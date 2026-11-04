@@ -22,24 +22,47 @@ Clone the repository, enter it, and run the build script:
 ```powershell
 git clone https://github.com/aleksandeerG/AzerothSurvivors-trainer.git
 Set-Location .\AzerothSurvivors-trainer
-powershell -NoProfile -ExecutionPolicy Bypass -File .\trainer\build.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-The script produces **`Azeroth Trainer Plus.exe` in the repository root**. Paths are resolved relative to the script, so the build also works when invoked from another directory. Close the trainer before rebuilding to release the output file.
+The script produces **`build\Azeroth Trainer Plus.exe` inside the repository**. Source and output paths are resolved relative to the script, so the build also works when invoked from another directory. Build output is ignored by Git.
 
-Copy the executable beside your installed `AzerothSurvivors.exe`. Keep the game's existing data directories in place. For example:
+Copy the built executable beside your installed `AzerothSurvivors.exe`, or build and copy it in one command using `-GameDirectory`. Close the installed trainer before replacing its executable.
+
+For a repository in its own folder inside the game directory, run this from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -GameDirectory '..'
+```
+
+For a game installed elsewhere, pass its directory instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -GameDirectory 'F:\Games\Azeroth Survivors'
+```
+
+`-GameDirectory` must contain `AzerothSurvivors.exe`. Relative game paths are resolved from your current PowerShell directory. Only the trainer executable is copied; the game's data and runtime backups stay in place.
+
+Recommended local layout:
 
 ```text
 Azeroth Survivors/
   AzerothSurvivors.exe
   Azeroth Trainer Plus.exe
   Data/                       (existing game data)
+  AzerothSurvivors-trainer/    (Git repository)
+    .git/
+    README.md
+    src/
+    scripts/
+      build.ps1
+    build/                    (ignored compiled output)
   trainer/
     backups/                  (created when profile edits need a backup)
     game-check.txt            (created by compatibility diagnostics)
 ```
 
-If you clone directly into the game directory, the build output is already in the right place. The repository's ignore rules keep the game, personal saves, backups, and generated output out of Git.
+Keep the repository in its own directory. When cloning from the game directory, Git creates the `AzerothSurvivors-trainer` child folder automatically. The game directory itself is outside the repository. The separate `trainer` folder beside the game holds runtime reports and profile backups.
 
 ## Start and use
 
@@ -167,20 +190,21 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | Talents or marks look unchanged | Wait for completion, then close and reopen the Armory. Respec before reducing earned points below allocated ranks. |
 | High speed changes combat | Reduce simulation speed; longer simulation steps can skip collisions. |
 | Build compiler missing | Install or enable .NET Framework 4.5 or newer with the 64-bit compiler at `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. |
-| Build cannot overwrite the output | Close the running trainer and retry the build. |
+| Build or install cannot overwrite the output | Close the trainer using that executable and retry. |
+| GameDirectory is rejected | Pass the installed game directory containing `AzerothSurvivors.exe`; relative paths start at your current PowerShell directory. |
 
 ## Source layout
 
 | File | Purpose |
 | --- | --- |
-| `trainer/build.ps1` | Builds the standalone x64 Windows executable using an explicit production source list |
-| `trainer/Program.cs` | Windows Forms entry point and compatibility command dispatch |
-| `trainer/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
-| `trainer/AzerothTrainer.cs` | Windows process/memory APIs and thread suspension |
-| `trainer/HookEngine.cs` | Supported build data, patch lifecycle, session management, resources, and profile backups |
-| `trainer/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |
-| `trainer/RunEnhancements.cs` | Stat minimums and automatic offer selection |
-| `trainer/UnwindSupport.cs` | Windows x64 unwind metadata registration for generated hooks |
-| `trainer/TrainerDiagnostics.cs` | On-disk and live compatibility reporting |
+| `scripts/build.ps1` | Builds into `build` using an explicit production source list; optionally installs the executable with `-GameDirectory` |
+| `src/Program.cs` | Windows Forms entry point and compatibility command dispatch |
+| `src/UI/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
+| `src/Hooks/HookEngine.cs` | Supported build data, instruction assembly, patch lifecycle, session management, resources, and profile backups |
+| `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |
+| `src/Hooks/RunEnhancements.cs` | Stat minimums and automatic offer selection |
+| `src/Interop/Native.cs` | Windows process/memory APIs and thread suspension |
+| `src/Interop/UnwindSupport.cs` | Windows x64 unwind metadata registration for generated hooks |
+| `src/Diagnostics/TrainerDiagnostics.cs` | On-disk and live compatibility reporting |
 
 Only production source, the build script, this README, and ignore rules are published. Build outputs, game files, tests, local instructions, research notes, screenshots, reports, saves, and backups stay local.

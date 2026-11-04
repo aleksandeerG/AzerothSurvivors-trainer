@@ -2,17 +2,20 @@
 /*
 !/.gitignore
 !/README.md
-!/trainer/
-/trainer/*
-!/trainer/AzerothTrainer.cs
-!/trainer/HookEngine.cs
-!/trainer/TrainerWindow.cs
-!/trainer/Program.cs
-!/trainer/AdditionalCode.cs
-!/trainer/RunEnhancements.cs
-!/trainer/UnwindSupport.cs
-!/trainer/TrainerDiagnostics.cs
-!/trainer/build.ps1
+!/src/
+/src/**
+!/src/**/
+!/src/**/*.cs
+!/scripts/
+/scripts/*
+!/scripts/build.ps1
+
+# Generated output and local development files.
+/build/
+/.local/
+**/tests/
+**/*Tests.cs
+**/SelfTest.cs
 
 # Local contributor instructions must stay private.
 AGENTS.md
