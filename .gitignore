@@ -1,0 +1,19 @@
+# Publish only the trainer's production sources and build documentation.
+/*
+!/.gitignore
+!/README.md
+!/trainer/
+/trainer/*
+!/trainer/AzerothTrainer.cs
+!/trainer/HookEngine.cs
+!/trainer/TrainerWindow.cs
+!/trainer/Program.cs
+!/trainer/AdditionalCode.cs
+!/trainer/RunEnhancements.cs
+!/trainer/UnwindSupport.cs
+!/trainer/TrainerDiagnostics.cs
+!/trainer/build.ps1
+
+# Local contributor instructions must stay private.
+AGENTS.md
+**/AGENTS.md
