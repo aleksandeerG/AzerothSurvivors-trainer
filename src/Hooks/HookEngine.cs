@@ -237,13 +237,16 @@ namespace AzerothTrainer
     {
         internal const string PrivilegeMessage="Cannot access the game. Run the trainer and game as the same Windows user and with matching administrator privileges. If the game is elevated, run the trainer as administrator too.";
         internal readonly Process Game;
-        internal string CompatibilitySummary {get{return layout.Summary;}}
+        internal string CompatibilityDetails {get{return layout.Details;}}
+        internal string UnavailableFeatures {get{return layout.UnavailableNames;}}
+        internal bool Supports(TrainerFeature feature){return layout.Supports(feature);}
         readonly IntPtr handle;
-        readonly List<MemoryPatch> all=new List<MemoryPatch>(),rarity=new List<MemoryPatch>(),prices=new List<MemoryPatch>();
+        readonly List<MemoryPatch> all=new List<MemoryPatch>(),rarity=new List<MemoryPatch>{null,null,null},prices=new List<MemoryPatch>();
         readonly MemoryPatch run,xp,profile,health;
         readonly GameLayout layout;
         uint talentSequence,marksSequence;
-        bool disposed;
+        bool disposed,connected;
+        internal bool Connected {get{return connected||Enabled;}}
         internal bool Enabled {get {foreach(var p in all)if(p.Enabled)return true;return false;}}
         internal bool Exited {get {if(disposed)return true;try{return Game.HasExited;}catch(InvalidOperationException){return true;}}}
         internal PatchSession(Process game,IntPtr imageBase,GameLayout build)
@@ -253,13 +256,21 @@ namespace AzerothTrainer
             try
             {
                 layout.ValidateLive(handle,imageBase);
-                AddRarity(imageBase,layout.Site("Spell"),0);AddRarity(imageBase,layout.Site("Jewelry1"),1);AddRarity(imageBase,layout.Site("Jewelry2"),2);
-                HookSite tick=layout.Site("RunHook"),award=layout.Site("XpHook"),server=layout.Site("ProfileHook"),maximum=layout.Site("HealthHook");
-                run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
-                xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});
-                profile=AddGenerated(imageBase,server,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,server.Continuation),imageBase,layout);});
-                health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});
-                for(int i=0;i<5;i++)
+                if(Supports(TrainerFeature.SpellChance))AddRarity(imageBase,layout.Site("Spell"),0);
+                if(Supports(TrainerFeature.ItemChance)){AddRarity(imageBase,layout.Site("Jewelry1"),1);AddRarity(imageBase,layout.Site("Jewelry2"),2);}
+                if(Supports(TrainerFeature.RunControls))
+                {
+                    HookSite tick=layout.Site("RunHook"),award=layout.Site("XpHook"),maximum=layout.Site("HealthHook");
+                    run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
+                    xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});
+                    health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});
+                }
+                if(Supports(TrainerFeature.ClassProgression))
+                {
+                    HookSite server=layout.Site("ProfileHook");
+                    profile=AddGenerated(imageBase,server,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,server.Continuation),imageBase,layout);});
+                }
+                for(int i=0;Supports(TrainerFeature.RerollCost)&&i<5;i++)
                 {
                     HookSite branchSite=layout.Site("PriceBranch"+i),costSite=layout.Site("PriceCost"+i);
                     var branch=new MemoryPatch(handle,game.Id,Native.Add(imageBase,branchSite.Rva),branchSite.Original,branchSite.Guard,null);
@@ -269,6 +280,7 @@ namespace AzerothTrainer
                 foreach(var patch in all)patch.Validate();
                 foreach(string name in new string[]{"GuardCoop","GuardHud"})
                 {
+                    if(!layout.HasSite(name))continue;
                     var guard=layout.Site(name);
                     if(!Native.Equal(Native.Read(handle,Native.Add(imageBase,guard.Rva),guard.Original.Length),guard.Original))throw new Exception("Another trainer has modified the game. Disable it before connecting.");
                 }
@@ -278,7 +290,7 @@ namespace AzerothTrainer
         void AddRarity(IntPtr image,HookSite site,int variant)
         {
             var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,delegate(IntPtr unused){return RarityCode.Build(Native.Add(image,site.Continuation),variant);},site.Rva);
-            rarity.Add(patch);all.Add(patch);
+            rarity[variant]=patch;all.Add(patch);
         }
         MemoryPatch AddGenerated(IntPtr image,HookSite site,Func<IntPtr,byte[]> code)
         {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva);all.Add(patch);return patch;}
@@ -297,29 +309,13 @@ namespace AzerothTrainer
         internal void Apply(TrainerOptions options)
         {
             ValidateOptions(options);
+            RequireOptions(options);
             if(Exited)throw new Exception("The game has exited.");
-            health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
-            health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
-            run.Install(null,delegate(MemoryPatch p)
-            {
-                p.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
-                foreach(int offset in RunCommands.Offsets)p.Data(offset,BitConverter.GetBytes(-1L));
-                p.Data(RunCommands.Owner,new byte[24]);
-                p.Data(AutoPickCode.SpellMode,new byte[40]);p.Data(AutoPickCode.Random,BitConverter.GetBytes(unchecked((uint)Environment.TickCount)|1));p.Data(AutoPickCode.MaxDelta,BitConverter.GetBytes(0.1f));
-                p.Data(RunStat.DataOffset,new byte[RunStat.All.Length*RunStat.Stride]);
-            });
-            run.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
-            if(options.XpEnabled){xp.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));p.Data(XpCode.CarryOffset,new byte[XpCode.CarrySlots*XpCode.CarryStride]);});xp.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));}else xp.Remove();
-            run.Data(AutoPickCode.Delay,BitConverter.GetBytes((float)options.AutoPickDelay));
-            run.Data(AutoPickCode.SpellMode,BitConverter.GetBytes(options.AutoSpellMode));run.Data(AutoPickCode.ItemMode,BitConverter.GetBytes(options.AutoItemMode));
-            for(int i=0;i<RunStat.All.Length;i++)run.Data(RunStat.DataOffset+i*RunStat.Stride,BitConverter.GetBytes((ulong)RunStat.All[i].Bits(options.StatValues[i])|(options.StatEnabled[i]?1UL<<32:0)));
-            profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));});
-            run.Data(RunCode.AutoHeal,BitConverter.GetBytes(options.AutoHeal?1:0));
-            run.Data(RunCode.UnlimitedBanish,BitConverter.GetBytes(options.UnlimitedBanish?1:0));
-            run.Data(RunCode.UnlimitedReroll,BitConverter.GetBytes(options.UnlimitedReroll?1:0));
+            if(run!=null)ApplyRunOptions(options);
+            if(profile!=null)profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));});
             for(int index=0;index<rarity.Count;index++)
             {
-                var p=rarity[index];double chance=index==0?options.SpellChance:options.ItemChance;
+                var p=rarity[index];if(p==null)continue;double chance=index==0?options.SpellChance:options.ItemChance;
                 if(index==0?options.SpellLegendary:options.ItemLegendary)
                 {
                     p.Install(null,delegate(MemoryPatch item){item.Data(0,BitConverter.GetBytes((float)(chance/100.0)));item.Data(4,BitConverter.GetBytes(1f));});
@@ -359,6 +355,37 @@ namespace AzerothTrainer
                     }
                 }
             }
+            connected=true;
+        }
+        void ApplyRunOptions(TrainerOptions options)
+        {
+            health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
+            health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
+            run.Install(null,delegate(MemoryPatch p)
+            {
+                p.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
+                foreach(int offset in RunCommands.Offsets)p.Data(offset,BitConverter.GetBytes(-1L));
+                p.Data(RunCommands.Owner,new byte[24]);
+                p.Data(AutoPickCode.SpellMode,new byte[40]);p.Data(AutoPickCode.Random,BitConverter.GetBytes(unchecked((uint)Environment.TickCount)|1));p.Data(AutoPickCode.MaxDelta,BitConverter.GetBytes(0.1f));
+                p.Data(RunStat.DataOffset,new byte[RunStat.All.Length*RunStat.Stride]);
+            });
+            run.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
+            if(options.XpEnabled){xp.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));p.Data(XpCode.CarryOffset,new byte[XpCode.CarrySlots*XpCode.CarryStride]);});xp.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));}else xp.Remove();
+            run.Data(AutoPickCode.Delay,BitConverter.GetBytes((float)options.AutoPickDelay));
+            run.Data(AutoPickCode.SpellMode,BitConverter.GetBytes(options.AutoSpellMode));run.Data(AutoPickCode.ItemMode,BitConverter.GetBytes(options.AutoItemMode));
+            for(int i=0;i<RunStat.All.Length;i++)run.Data(RunStat.DataOffset+i*RunStat.Stride,BitConverter.GetBytes((ulong)RunStat.All[i].Bits(options.StatValues[i])|(options.StatEnabled[i]?1UL<<32:0)));
+            run.Data(RunCode.AutoHeal,BitConverter.GetBytes(options.AutoHeal?1:0));
+            run.Data(RunCode.UnlimitedBanish,BitConverter.GetBytes(options.UnlimitedBanish?1:0));
+            run.Data(RunCode.UnlimitedReroll,BitConverter.GetBytes(options.UnlimitedReroll?1:0));
+        }
+        void Require(TrainerFeature feature)
+        {if(!Supports(feature))throw new Exception(GameLayout.FeatureName(feature)+": unavailable for this game build. An updated trainer is required for this feature.");}
+        void RequireOptions(TrainerOptions o)
+        {
+            if(o.SpellLegendary)Require(TrainerFeature.SpellChance);
+            if(o.ItemLegendary)Require(TrainerFeature.ItemChance);
+            if(o.FixedCost)Require(TrainerFeature.RerollCost);
+            if(o.SpeedEnabled||o.XpEnabled||o.AutoHeal||o.UnlimitedBanish||o.UnlimitedReroll||o.AutoSpellMode!=0||o.AutoItemMode!=0||Array.Exists(o.StatEnabled,delegate(bool active){return active;}))Require(TrainerFeature.RunControls);
         }
         internal static void ValidateOptions(TrainerOptions o)
         {
@@ -375,6 +402,7 @@ namespace AzerothTrainer
         internal void Advance(float seconds){if(Single.IsNaN(seconds)||Single.IsInfinity(seconds)||seconds<0||seconds>3600)throw new ArgumentOutOfRangeException("seconds");QueueBits(RunCode.AdvanceRequest,BitConverter.GetBytes(seconds));}
         void QueueBits(int offset,byte[] bytes)
         {
+            Require(TrainerFeature.RunControls);
             if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
             ulong state=BitConverter.ToUInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),8),0);
             IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0));
@@ -386,6 +414,7 @@ namespace AzerothTrainer
         }
         internal void CancelRunRequests()
         {
+            Require(TrainerFeature.RunControls);
             if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
             using(var frozen=new FrozenThreads(Game.Id))
                 foreach(int offset in RunCommands.Offsets)run.Data(offset,BitConverter.GetBytes(-1L));
@@ -394,6 +423,7 @@ namespace AzerothTrainer
         internal uint SetMarks(int classId,int rawTenths){if(rawTenths<0||rawTenths>10000000)throw new ArgumentOutOfRangeException("marks");return QueueProfile(ProfileCode.MarksRequest,classId,rawTenths);}
         uint QueueProfile(int offset,int classId,int value)
         {
+            Require(TrainerFeature.ClassProgression);
             if(classId<1||classId>11||classId==6||classId==10)throw new ArgumentOutOfRangeException("class");
             if(Exited||!profile.Enabled)throw new Exception("Enable the trainer first.");BackupProfile();
             uint sequence=offset==ProfileCode.TalentRequest?checked(++talentSequence):checked(++marksSequence);
@@ -401,7 +431,7 @@ namespace AzerothTrainer
         }
         internal int TalentResult(uint sequence){return ReadProfileResult(ProfileCode.TalentResult,sequence);}
         internal int MarksResult(uint sequence){return ReadProfileResult(ProfileCode.MarksResult,sequence);}
-        int ReadProfileResult(int offset,uint sequence){if(Exited||!profile.Enabled)return 0;return ProfileCode.CompletedStatus(BitConverter.ToUInt64(Native.Read(handle,Native.Add(profile.Cave,4096+offset),8),0),sequence);}
+        int ReadProfileResult(int offset,uint sequence){if(Exited||profile==null||!profile.Enabled)return 0;return ProfileCode.CompletedStatus(BitConverter.ToUInt64(Native.Read(handle,Native.Add(profile.Cave,4096+offset),8),0),sequence);}
         internal static void BackupProfile()
         {
             string source=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"wenilla-rogue","characters.txt");
@@ -413,14 +443,13 @@ namespace AzerothTrainer
         void Queue(int offset,int value,int maximum)
         {
             if(value<0||value>maximum)throw new ArgumentOutOfRangeException("value");
-            if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
             QueueBits(offset,BitConverter.GetBytes(value));
         }
         internal void Disable()
         {
             if(disposed)return;
-            if(Exited){foreach(var p in all)p.Abandon();return;}
-            if(!Enabled)return;
+            if(Exited){foreach(var p in all)p.Abandon();connected=false;return;}
+            if(!Enabled){connected=false;return;}
             try
             {
                 using(var frozen=new FrozenThreads(Game.Id))
@@ -430,9 +459,10 @@ namespace AzerothTrainer
                         if(prices[i].Enabled||prices[i+1].Enabled)
                             frozen.RequireOutside(prices[i].Site,(int)(prices[i+1].Site.ToInt64()-prices[i].Site.ToInt64()+12));
                     for(int i=all.Count-1;i>=0;i--)all[i].Remove();
+                    connected=false;
                 }
             }
-            catch{if(Exited){foreach(var p in all)p.Abandon();return;}throw;}
+            catch{if(Exited){foreach(var p in all)p.Abandon();connected=false;return;}throw;}
         }
         public void Dispose(){if(disposed)return;Disable();Native.CloseHandle(handle);Game.Dispose();disposed=true;}
     }

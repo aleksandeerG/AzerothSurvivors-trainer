@@ -13,9 +13,9 @@ namespace AzerothTrainer
         readonly CheckBox spellOn=new CheckBox(),itemOn=new CheckBox(),fixedCost=new CheckBox(),unlimitedBan=new CheckBox(),unlimitedReroll=new CheckBox(),autoHeal=new CheckBox(),speedOn=new CheckBox(),xpOn=new CheckBox(),autoSpell=new CheckBox(),autoItem=new CheckBox();
         readonly ComboBox resourceKind=new ComboBox(),classKind=new ComboBox(),spellRule=new ComboBox(),itemRule=new ComboBox();
         readonly DataGridView stats=new DataGridView();
-        readonly Label status=new Label(),resourceHelp=new Label();readonly Timer timer=new Timer();
+        readonly Label status=new Label(),resourceHelp=new Label(),compatibility=new Label();readonly Timer timer=new Timer();readonly ToolTip compatibilityTip=new ToolTip();
         readonly Button enable=new Button(),apply=new Button(),disable=new Button();
-        readonly List<Control> connectedControls=new List<Control>();
+        readonly Dictionary<Control,TrainerFeature> connectedFeatures=new Dictionary<Control,TrainerFeature>();
         readonly int[] classIds={1,2,3,4,5,7,8,9,11};
         PatchSession session;bool busy;uint talentPending,marksPending;
         internal TrainerWindow()
@@ -45,9 +45,9 @@ namespace AzerothTrainer
             Label(profile.Controls,"Class to edit",18,21,210,27,null);classKind.SetBounds(235,19,280,30);ComboStyle(classKind);
             classKind.Items.AddRange(new object[]{"Warrior","Paladin","Hunter","Rogue","Priest","Shaman","Mage","Warlock","Druid"});classKind.SelectedIndex=0;profile.Controls.Add(classKind);
             Label(profile.Controls,"Earned talent points",18,83,250,27,null);Number(profile.Controls,talents,281,80,125,0,51,51,0,1);
-            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);ProfileQueued("Class talent points");},true);
+            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);ProfileQueued("Class talent points");},true,TrainerFeature.ClassProgression);
             Label(profile.Controls,"Class marks",18,143,250,27,null);Number(profile.Controls,marks,281,140,125,0,1000000,1000,1,0.1m);
-            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));ProfileQueued("Class marks");},true);
+            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));ProfileQueued("Class marks");},true,TrainerFeature.ClassProgression);
             Label(profile.Controls,"Permanent changes; backups are saved in trainer\\backups.\nRespec before lowering points. Reopen the Armory to refresh.\nMarks still require normal unlocks.",18,206,660,156,new Font("Segoe UI",9));
             Check(automation.Controls,autoSpell,"Auto-pick spell offers",18,21,290,false);
             spellRule.SetBounds(333,21,345,30);ComboStyle(spellRule);spellRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(spellRule);spellRule.SelectedIndex=4;
@@ -62,6 +62,7 @@ namespace AzerothTrainer
             Configure(apply,"Apply options",378,497,170);apply.Click+=async delegate{await ApplyAsync();};Controls.Add(apply);
             Configure(disable,"Disable",562,497,178);disable.Click+=delegate{try{if(!ConfirmPendingProfile("Disable")||session==null)return;bool pending=talentPending!=0||marksPending!=0;session.Disable();talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();status.Text=pending?"Disabled. Check the Armory: a pending class edit may have completed before disabling.":"Disabled. Original game code restored.";}catch(Exception ex){ShowError(ex);}};Controls.Add(disable);
             status.SetBounds(23,555,714,74);status.Text="Disabled. Start the game, select options, then enable.";Controls.Add(status);
+            compatibility.SetBounds(23,630,714,18);compatibility.Font=new Font("Segoe UI",8.5f);compatibility.ForeColor=Color.FromArgb(255,192,90);compatibility.AutoEllipsis=true;Controls.Add(compatibility);
             Label(Controls,"Created by aleksanderG",23,649,205,25,new Font("Segoe UI",9));
             CreditLink("aleksanderg.com","https://aleksanderg.com/",235,649,190);
             CreditLink("Support on Ko-fi","https://ko-fi.com/K3P227JS3D",451,649,220);
@@ -69,7 +70,7 @@ namespace AzerothTrainer
             FormClosing+=delegate(object sender,FormClosingEventArgs e)
             {
                 if(busy){e.Cancel=true;status.Text="Finishing the trainer update. Close again when it completes.";return;}
-                try{if(!ConfirmPendingProfile("Close")){e.Cancel=true;return;}Detach();timer.Stop();timer.Dispose();}catch(Exception ex){e.Cancel=true;ShowError(ex);}
+                try{if(!ConfirmPendingProfile("Close")){e.Cancel=true;return;}Detach();timer.Stop();timer.Dispose();compatibilityTip.Dispose();}catch(Exception ex){e.Cancel=true;ShowError(ex);}
             };
         }
         static TabPage Tab(TabControl tabs,string title){var p=new TabPage(title){BackColor=Color.FromArgb(30,34,43),ForeColor=Color.WhiteSmoke};tabs.TabPages.Add(p);return p;}
@@ -90,6 +91,7 @@ namespace AzerothTrainer
             {
                 if(session!=null&&session.Exited){session.Dispose();session=null;}
                 if(session==null)session=await Task.Run(delegate{return PatchSession.Attach();});
+                ApplyCompatibility();options=Options();
                 await Task.Run(delegate{session.Apply(options);});status.ForeColor=Color.FromArgb(255,192,90);status.Text=ActiveSummary(options);
             }
             catch(Exception ex){status.ForeColor=Color.LightCoral;status.Text=FailureStatus(session!=null&&session.Enabled);ShowError(ex);}
@@ -169,7 +171,32 @@ namespace AzerothTrainer
             GameLocator.Remember(gamePath);status.Text="Game started. Enable the trainer when ready.";
         }
         void Detach(){if(session!=null){session.Dispose();session=null;}talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();}
-        void UpdateButtons(){bool active=session!=null&&session.Enabled;enable.Enabled=!active&&!busy;apply.Enabled=disable.Enabled=active&&!busy;foreach(Control c in connectedControls)c.Enabled=active&&!busy;}
+        bool Available(TrainerFeature feature){return session==null||session.Supports(feature);}
+        void FeatureSwitch(CheckBox box,Control input,TrainerFeature feature)
+        {
+            bool available=Available(feature);if(!available)box.Checked=false;box.Enabled=available;
+            if(input!=null)input.Enabled=available&&box.Checked;
+            compatibilityTip.SetToolTip(box,available?"":"Unavailable for this game build. This feature needs a trainer update.");
+        }
+        void ApplyCompatibility()
+        {
+            FeatureSwitch(spellOn,spell,TrainerFeature.SpellChance);FeatureSwitch(itemOn,item,TrainerFeature.ItemChance);FeatureSwitch(fixedCost,cost,TrainerFeature.RerollCost);
+            foreach(CheckBox box in new[]{unlimitedBan,unlimitedReroll,autoHeal})FeatureSwitch(box,null,TrainerFeature.RunControls);
+            FeatureSwitch(speedOn,speed,TrainerFeature.RunControls);FeatureSwitch(xpOn,xp,TrainerFeature.RunControls);
+            FeatureSwitch(autoSpell,spellRule,TrainerFeature.RunControls);FeatureSwitch(autoItem,itemRule,TrainerFeature.RunControls);
+            bool runAvailable=Available(TrainerFeature.RunControls);stats.Enabled=runAvailable;
+            if(!runAvailable)foreach(DataGridViewRow row in stats.Rows)row.Cells[0].Value=false;
+            foreach(Control control in new Control[]{resourceKind,resource,advance,pickDelay})control.Enabled=runAvailable;
+            foreach(Control control in new Control[]{classKind,talents,marks})control.Enabled=Available(TrainerFeature.ClassProgression);
+            compatibility.Text=session!=null&&session.UnavailableFeatures.Length!=0?"Unavailable for this build: "+session.UnavailableFeatures:"";
+            compatibilityTip.SetToolTip(compatibility,compatibility.Text);
+        }
+        void UpdateButtons()
+        {
+            ApplyCompatibility();bool active=session!=null&&session.Connected;
+            enable.Enabled=!active&&!busy;apply.Enabled=disable.Enabled=active&&!busy;
+            foreach(var entry in connectedFeatures)entry.Key.Enabled=active&&!busy&&Available(entry.Value);
+        }
         void SetBusy(bool value){foreach(Control c in Controls)if(!(c is Label))c.Enabled=!value;UpdateButtons();}
         void ShowError(Exception ex){UpdateButtons();MessageBox.Show(this,ex.Message,"Trainer",MessageBoxButtons.OK,MessageBoxIcon.Information);}
         void CreditLink(string text,string url,int x,int y,int width)
@@ -182,7 +209,7 @@ namespace AzerothTrainer
         void Check(Control.ControlCollection c,CheckBox b,string text,int x,int y,int width,bool value){b.Text=text;b.SetBounds(x,y,width,29);b.Checked=value;c.Add(b);}
         void Label(Control.ControlCollection c,string text,int x,int y,int width,int height,Font font){var l=new Label{Text=text,Location=new Point(x,y),Size=new Size(width,height)};if(font!=null)l.Font=font;c.Add(l);}
         static void Configure(Button b,string text,int x,int y,int width){b.Text=text;b.SetBounds(x,y,width,36);b.FlatStyle=FlatStyle.Flat;b.BackColor=Color.FromArgb(43,48,59);}
-        void Button(Control.ControlCollection c,string text,int x,int y,int width,Action action,bool needsSession)
-        {var b=new Button();Configure(b,text,x,y,width);b.Click+=delegate{try{action();}catch(Exception ex){status.Text="Action failed: "+ex.Message;ShowError(ex);}};c.Add(b);if(needsSession)connectedControls.Add(b);}
+        void Button(Control.ControlCollection c,string text,int x,int y,int width,Action action,bool needsSession,TrainerFeature feature=TrainerFeature.RunControls)
+        {var b=new Button();Configure(b,text,x,y,width);b.Click+=delegate{try{action();}catch(Exception ex){status.Text="Action failed: "+ex.Message;ShowError(ex);}};c.Add(b);if(needsSession)connectedFeatures.Add(b,feature);}
     }
 }

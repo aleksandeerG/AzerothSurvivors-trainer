@@ -54,6 +54,7 @@ namespace AzerothTrainer
         internal readonly SiteSpec[] Sites;
         internal LayoutSpec(string name,bool updated,FunctionSpec[] functions,SiteSpec[] sites){Name=name;Updated=updated;Functions=functions;Sites=sites;}
     }
+    internal enum TrainerFeature { SpellChance,ItemChance,RerollCost,RunControls,ClassProgression }
     internal sealed class GameLayout
     {
         sealed class MatchedFunction
@@ -62,6 +63,15 @@ namespace AzerothTrainer
         }
         readonly Dictionary<string,MatchedFunction> functions=new Dictionary<string,MatchedFunction>();
         readonly Dictionary<string,HookSite> sites=new Dictionary<string,HookSite>();
+        readonly Dictionary<string,string> failures=new Dictionary<string,string>();
+        readonly Dictionary<TrainerFeature,string> unavailable=new Dictionary<TrainerFeature,string>();
+        static readonly Dictionary<TrainerFeature,string[]> requirements=new Dictionary<TrainerFeature,string[]>{
+            {TrainerFeature.SpellChance,new[]{"Spell"}},
+            {TrainerFeature.ItemChance,new[]{"Jewelry"}},
+            {TrainerFeature.RerollCost,new[]{"Price0","Hud","Price2","Price3","Price4"}},
+            {TrainerFeature.RunControls,new[]{"Run","Coop","Xp","Health","Choose"}},
+            {TrainerFeature.ClassProgression,new[]{"Profile","ProfileActions","EnsureClass","SaveProfile","SerializeProfile","GrowMarks"}}
+        };
         readonly LayoutSpec spec;
         readonly long preferredBase;
         internal readonly string Hash,Name;
@@ -75,19 +85,36 @@ namespace AzerothTrainer
                 for(int index=0;index<image.Functions.Count;index++)
                 {
                     var candidate=image.Functions[index];
-                    if(!signature.Matches(image,candidate))continue;
-                    if(signature.Previous!=null&&(index==0||!signature.Previous.Matches(image,image.Functions[index-1])))continue;
-                    if(found!=null)throw new Exception(signature.Name+": ambiguous function signature.");
+                    try
+                    {
+                        if(!signature.Matches(image,candidate))continue;
+                        if(signature.Previous!=null&&(index==0||!signature.Previous.Matches(image,image.Functions[index-1])))continue;
+                    }
+                    catch(Exception ex){failures[signature.Name]="unverifiable context: "+ex.Message;continue;}
+                    if(found!=null){failures[signature.Name]="ambiguous function signature";found=null;break;}
                     found=candidate;
                 }
-                if(found==null)throw new Exception(signature.Name+": code or stack layout has changed.");
+                if(found==null){if(!failures.ContainsKey(signature.Name))failures[signature.Name]="code or stack layout has changed";continue;}
                 functions.Add(signature.Name,new MatchedFunction{Range=found,Body=image.Read(found.Start,found.Length),Relocations=image.Relocations.Where(r=>r>=found.Start&&r+8<=found.Start+found.Length).Select(r=>r-found.Start).ToArray()});
             }
-            foreach(var site in layout.Sites)sites.Add(site.Name,new HookSite(image,functions[site.Function].Range,site));
+            foreach(var site in layout.Sites)if(functions.ContainsKey(site.Function))sites.Add(site.Name,new HookSite(image,functions[site.Function].Range,site));
             // Explicitly tie the injected callbacks to the game's existing call
             // graph. Matching a byte sequence elsewhere must not select a helper.
-            ValidateEdge("Xp","Health");ValidateEdge("Run","Coop");ValidateEdge("Profile","ProfileActions");
-            ValidateEdge("ProfileActions","EnsureClass");ValidateEdge("ProfileActions","SaveProfile");ValidateEdge("SaveProfile","SerializeProfile");
+            foreach(var feature in requirements)
+            {
+                var missing=feature.Value.Where(name=>!functions.ContainsKey(name)).ToArray();
+                if(missing.Length!=0){unavailable[feature.Key]=String.Join(", ",missing.Select(name=>name+": "+failures[name]).ToArray());continue;}
+                try
+                {
+                    if(feature.Key==TrainerFeature.RunControls){ValidateEdge("Xp","Health");ValidateEdge("Run","Coop");}
+                    if(feature.Key==TrainerFeature.ClassProgression)
+                    {
+                        ValidateEdge("Profile","ProfileActions");ValidateEdge("ProfileActions","EnsureClass");
+                        ValidateEdge("ProfileActions","SaveProfile");ValidateEdge("SaveProfile","SerializeProfile");
+                    }
+                }
+                catch(Exception ex){unavailable[feature.Key]=ex.Message;}
+            }
         }
         void ValidateEdge(string caller,string callee)
         {
@@ -100,14 +127,39 @@ namespace AzerothTrainer
         }
         internal static GameLayout Load(string path)
         {
-            var image=new GameImage(path);var failures=new List<string>();
+            var image=new GameImage(path);var failures=new List<string>();GameLayout best=null;bool tied=false;
             foreach(var layout in BuildCatalog.Layouts)
             {
-                try{return new GameLayout(image,layout);}
+                try
+                {
+                    var candidate=new GameLayout(image,layout);
+                    failures.Add(candidate.Details);
+                    if(candidate.AvailableCount==0)continue;
+                    if(best==null||candidate.AvailableCount>best.AvailableCount){best=candidate;tied=false;}
+                    else if(candidate.AvailableCount==best.AvailableCount)tied=true;
+                }
                 catch(Exception ex){failures.Add(layout.Name+": "+ex.Message);}
             }
-            throw new Exception("Game code or memory layout is not recognized. Updated compatibility signatures are required. "+String.Join(" | ",failures.ToArray()));
+            if(best!=null&&!tied)return best;
+            var error=new Exception(tied?"Game layout selection is ambiguous. No hooks were selected. An updated trainer is required.":"No trainer features match this game safely. An updated trainer is required. Run --verify-files for details.");
+            error.Data["CompatibilityDetails"]=String.Join(Environment.NewLine,failures.ToArray());throw error;
         }
+        internal bool HasSite(string name){return sites.ContainsKey(name);}
+        internal bool Supports(TrainerFeature feature){return requirements.ContainsKey(feature)&&!unavailable.ContainsKey(feature);}
+        internal int AvailableCount {get{return requirements.Count-unavailable.Count;}}
+        internal bool Complete {get{return AvailableCount==requirements.Count;}}
+        internal static string FeatureName(TrainerFeature feature)
+        {
+            switch(feature)
+            {
+                case TrainerFeature.SpellChance:return "Spell chance";
+                case TrainerFeature.ItemChance:return "Item chance";
+                case TrainerFeature.RerollCost:return "Reroll cost";
+                case TrainerFeature.RunControls:return "Run controls, stats and auto-pick";
+                default:return "Class progression";
+            }
+        }
+        internal string UnavailableNames {get{return String.Join("; ",unavailable.Keys.Select(FeatureName).ToArray());}}
         internal HookSite Site(string name){return sites[name];}
         internal int Rva(string function){return functions[function].Range.Start;}
         internal int HealthRegister {get{return Updated?14:6;}}
@@ -150,6 +202,10 @@ namespace AzerothTrainer
                 if(!Native.Equal(expected,Native.Read(handle,Native.Add(imageBase,function.Range.Start),expected.Length)))throw new Exception(entry.Key+": running game code differs from the validated executable. Disable other trainers or restart the game.");
             }
         }
-        internal string Summary {get{return Name+"; "+functions.Count+" function signatures, 17 patch sites and 2 guards validated. SHA-256 "+Hash;}}
+        internal string Summary {get{return Name+"; "+AvailableCount+"/5 feature groups available; "+functions.Count+"/18 function signatures and "+sites.Count+" hook/guard sites validated. SHA-256 "+Hash;}}
+        internal string Details
+        {
+            get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,requirements.Keys.Select(feature=>FeatureName(feature)+": "+(Supports(feature)?"available":"UNAVAILABLE: "+unavailable[feature])).ToArray());}
+        }
     }
 }
