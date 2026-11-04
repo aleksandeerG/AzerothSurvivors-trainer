@@ -9,7 +9,7 @@ Control legendary chances, reroll prices, run speed, XP, resources, automatic of
 ## Requirements
 
 - 64-bit Windows with .NET Framework 4.5 or newer (4.8 recommended).
-- The supported desktop game executable, build date **2026-11-02**. Compatibility is tied to its SHA-256 and instruction bytes; a matching version name alone is insufficient.
+- A desktop game with a recognized code and memory layout. Both verified layouts below are supported, and compatible builds can be discovered after their code addresses move.
 - The supported game installed anywhere on your PC. The trainer can run from any folder.
 - The trainer and game running as the same Windows user with matching administrator privileges.
 
@@ -114,7 +114,16 @@ Select a class, then set earned points (0-51) or marks. Changes are permanent, w
 
 ## Compatibility and lifecycle
 
-The standalone x64 executable uses Windows .NET Framework and needs no Python, Cheat Engine or downloaded packages. It validates the executable SHA-256, all 17 patch sites and the unchanged HUD and co-op guards (19 compatibility sites) for the installed desktop build (embedded date 2026-11-02). A game update needs verified offsets.
+The trainer discovers functions through the executable's runtime-function table and complete code fingerprints. It validates 18 function bodies, their stack-unwind information, required callback relationships, 17 patch sites, and two guards. It resolves addresses and selects the matching memory layout automatically. Before enabling, complete live function bodies must match the validated file, allowing for Windows ASLR relocations.
+
+SHA-256 identifies the executable in diagnostics; it is **not a version whitelist**. These are the verified reference builds:
+
+| Reference | SHA-256 |
+| --- | --- |
+| Original desktop layout | `0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908` |
+| Updated desktop layout | `6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa` |
+
+This supports compatible address changes, rather than every possible future update. Fingerprints mask four-byte PC-relative addresses while keeping instructions, field offsets, internal branches, and stack layouts exact. Missing or ambiguous matches, changed fields, altered callback relationships, and changed unwind data are refused. A game update that changes those contracts still needs a verified layout/signature update. No offsets are guessed, and there is no force-enable option.
 
 Run the trainer and game as the same Windows user with matching administrator privileges. Joining co-op clients cannot control the host's simulation. If the trainer is forcibly terminated while enabled, restart the game to remove its hooks.
 
@@ -133,7 +142,7 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-files` works with the game closed. It verifies the on-disk executable hash, 19 instruction sites, and seven original unwind frames. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
+`--verify-files` works with the game closed. It resolves a compatible layout and checks complete function fingerprints, required call relationships, unwind data, and hook contexts. Its report includes the selected layout and executable hash. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
 
 To inspect an already running game, close other trainers normally and run:
 
@@ -142,7 +151,7 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-game' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-game` checks the hash, access to the process, module base, gameplay hook sites, HUD/co-op guards, and pricing sites without installing hooks. An already enabled trainer changes these sites, so disable it first. Both commands return exit code 0 on success or 1 on failure, and overwrite `trainer/game-check.txt` with the latest result. The ordinary UI performs compatibility checks when connecting as well.
+`--verify-game` resolves the layout and compares complete live function bodies against the validated file, including ASLR adjustments, without installing hooks. An already enabled trainer changes those bodies, so disable it first. Both commands return exit code 0 on success or 1 on failure, and overwrite `trainer/game-check.txt` with the latest result. The UI performs the same compatibility checks when connecting.
 
 Compatibility checks do not establish that every option works throughout a complete run. Full live auto-pick behavior, actual profile serialization, and Armory refresh have not been verified end to end. Use the status messages and check the game's displayed values after a request.
 
@@ -158,7 +167,7 @@ Disable restores executable instructions. It does not undo granted XP, resources
 
 | Symptom | What to do |
 | --- | --- |
-| Unsupported build | Run `--verify-files`. Offsets and expected bytes must be reverified for a changed game executable; bypassing the hash is insufficient. |
+| Unrecognized code/layout or ambiguous signature | Run `--verify-files` for the failing context. A changed contract needs verified compatibility signatures; editing the executable hash cannot make it compatible. |
 | Game not found | Click Launch game and choose the folder containing `AzerothSurvivors.exe`, or start the game yourself and click Enable trainer. |
 | Cannot access the game | Match the game's Windows account and administrator privileges. |
 | More than one game copy is running | Close extra instances, then enable the trainer. |
@@ -179,8 +188,11 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | `scripts/build.ps1` | Builds into `build` using an explicit production source list; optionally installs the executable with `-GameDirectory` |
 | `src/Program.cs` | Windows Forms entry point and compatibility command dispatch |
 | `src/Game/GameLocator.cs` | Running-game discovery and remembered installation location |
+| `src/Game/GameImage.cs` | PE sections, runtime-function ranges, executable hashing, and ASLR relocation parsing |
+| `src/Game/GameLayout.cs` | Unique signature matching, callback checks, memory layouts, and live validation |
+| `src/Game/BuildCatalog.cs` | Verified function fingerprints and hook contexts for supported layouts |
 | `src/UI/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
-| `src/Hooks/HookEngine.cs` | Supported build data, instruction assembly, patch lifecycle, session management, resources, and profile backups |
+| `src/Hooks/HookEngine.cs` | Layout-aware instruction assembly, patch lifecycle, session management, resources, and profile backups |
 | `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |
 | `src/Hooks/RunEnhancements.cs` | Stat minimums and automatic offer selection |
 | `src/Hooks/HealthCode.cs` | Max-HP floor during recalculation, before the game's HP clamp |

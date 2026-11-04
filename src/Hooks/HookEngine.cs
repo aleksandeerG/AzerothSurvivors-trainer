@@ -2,17 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
 
 namespace AzerothTrainer
 {
     internal static class RarityCode
     {
         internal const int DataOffset=4096;
-        internal const int HookRva=0x5fe1f52, ContinueRva=0x5fe1fc0;
-        internal const int SelectionLength=ContinueRva-HookRva;
-        internal const string SupportedHash="0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908";
-        internal static readonly byte[] Original=Hex("44 0F 2E E0 76 18 31 C0 48 83 7D 60 00 79 66");
         internal static byte[] Hex(string s)
         {
             string[] parts=s.Split(new char[]{' '},StringSplitOptions.RemoveEmptyEntries);
@@ -59,7 +54,18 @@ namespace AzerothTrainer
         internal readonly List<byte> Bytes=new List<byte>();
         readonly Dictionary<string,int> labels=new Dictionary<string,int>();
         readonly Dictionary<int,string> branches=new Dictionary<int,string>();
-        internal void Emit(string s){Bytes.AddRange(RarityCode.Hex(s));}
+        readonly GameLayout layout;
+        internal Assembler(GameLayout build=null){layout=build;}
+        internal void Emit(string s)
+        {
+            foreach(string token in s.Split(new char[]{' '},StringSplitOptions.RemoveEmptyEntries))
+                if(token[0]=='$')
+                {
+                    if(layout==null)throw new Exception("Game operands require a validated layout.");
+                    Bytes.AddRange(BitConverter.GetBytes(layout.Field(token.Substring(1))));
+                }
+                else Bytes.Add(Convert.ToByte(token,16));
+        }
         internal void Label(string s){labels.Add(s,Bytes.Count);}
         internal void Branch(string op,string target){Emit(op);branches.Add(Bytes.Count,target);Emit("00 00 00 00");}
         internal void Rip(string op,int target){Emit(op);Bytes.AddRange(BitConverter.GetBytes(target-(Bytes.Count+4)));}
@@ -76,37 +82,33 @@ namespace AzerothTrainer
     }
     internal static class RunCode
     {
-        internal const int HookRva=SpeedCode.HookRva,HudRva=0x5ef4ed1,CoopRva=0x5ecf814;
-        internal static readonly byte[] CoopOriginal=RarityCode.Hex("0F 28 F1 49 89 CD F3 0F 11 8D 00 17 00 00");
-        internal static readonly byte[] Original=SpeedCode.Original;
-        internal static readonly byte[] HudOriginal=RarityCode.Hex("48 C7 85 68 02 00 00 FE FF FF FF 48 89 D6");
         internal const int UnlimitedBanish=16,UnlimitedReroll=20,AutoHeal=36;
         // Aligned 64-bit mailboxes: high word = run epoch, low word = value bits.
         internal const int BanishRequest=320,GoldRequest=328,FreeRerollRequest=336,ShieldRequest=344,HealRequest=352,XpRequest=360,AdvanceRequest=368;
-        internal static byte[] Build(IntPtr start,IntPtr continuation,IntPtr image)
+        internal static byte[] Build(IntPtr start,IntPtr continuation,IntPtr image,GameLayout layout)
         {
-            var a=new Assembler();a.Emit("F3 0F 11 4C 24 78"); // movss [rsp+78],xmm1 (unscaled frame time)
+            var a=new Assembler(layout);a.Emit("F3 0F 11 4C 24 78"); // movss [rsp+78],xmm1 (unscaled frame time)
             SpeedCode.Emit(a);FrameCode.Save(a);FrameCode.Pointer(a,Native.Add(start,4096));
             RunCommands.Track(a);
-            Request(a,BanishRequest,0xf30,"banish");Request(a,GoldRequest,0x578,"gold");
-            Request(a,FreeRerollRequest,0x62c,"free");Request(a,ShieldRequest,0x56c,"shield");
+            Request(a,BanishRequest,layout.Field("banishes"),"banish");Request(a,GoldRequest,layout.Field("gold"),"gold");
+            Request(a,FreeRerollRequest,layout.Field("rerolls"),"free");Request(a,ShieldRequest,layout.Field("shield"),"shield");
             RunCommands.Take(a,XpRequest,"noXp");
             a.Emit("44 89 D2 48 89 F1"); // mov edx,r10d; mov rcx,rsi (Game, grant)
-            FrameCode.Call(a,Native.Add(image,0x5f05680)); // game XP award: enabled XP scaling also applies to grants
+            FrameCode.Call(a,Native.Add(image,layout.Rva("Xp"))); // game XP award: enabled XP scaling also applies to grants
             a.Label("noXp");FrameCode.Pointer(a,Native.Add(start,4096));
-            AutoPickCode.Emit(a,start,image);RunStat.Emit(a);
+            AutoPickCode.Emit(a,start,image,layout);RunStat.Emit(a,layout);
             a.Emit("83 78 10 00");a.Branch("0F 84","noBan"); // cmp [data+UnlimitedBanish],0
-            a.Emit("C7 86 30 0F 00 00 0F 27 00 00");a.Label("noBan"); // mov [Game+F30],9999
+            a.Emit("C7 86 $banishes 0F 27 00 00");a.Label("noBan"); // mov [Game+F30],9999
             a.Emit("83 78 14 00");a.Branch("0F 84","noReroll");
-            a.Emit("C7 86 2C 06 00 00 0F 27 00 00");a.Label("noReroll"); // mov [Game+62C],9999
+            a.Emit("C7 86 $rerolls 0F 27 00 00");a.Label("noReroll"); // mov [Game+62C],9999
             RunCommands.Take(a,HealRequest,"autoHeal");a.Branch("E9","heal");
             a.Label("autoHeal");a.Emit("83 78 24 00");a.Branch("0F 84","noHeal"); // cmp [data+AutoHeal],0
-            a.Emit("83 BE 68 05 00 00 00");a.Branch("0F 8E","noHeal"); // cmp HP,0: no automatic revival
-            a.Label("heal");a.Emit("44 8B 96 C8 05 00 00 44 89 96 68 05 00 00");a.Label("noHeal"); // copy max HP bits to current HP
+            a.Emit("83 BE $hp 00");a.Branch("0F 8E","noHeal"); // cmp HP,0: no automatic revival
+            a.Label("heal");a.Emit("44 8B 96 $maxHp 44 89 96 $hp");a.Label("noHeal"); // copy max HP bits to current HP
             RunCommands.Take(a,AdvanceRequest,"noAdvance");
-            a.Emit("66 41 0F 6E C2 F3 0F 58 86 A0 0E 00 00 F3 0F 11 86 A0 0E 00 00 F3 0F 11 40 68"); // movd xmm0,r10d; addss xmm0,clock; store clock and LastClock
+            a.Emit("66 41 0F 6E C2 F3 0F 58 86 $clock F3 0F 11 86 $clock F3 0F 11 40 68"); // movd xmm0,r10d; addss xmm0,clock; store clock and LastClock
             a.Label("noAdvance");a.Label("runDone");FrameCode.Restore(a);
-            a.Emit("80 B9 5E 0F 00 00 00"); // replay cmp [rcx+F5E],0 for the original solo/co-op branch
+            a.Emit("80 B9 $coop 00"); // replay cmp [rcx+F5E],0 for the original solo/co-op branch
             a.Bytes.AddRange(RarityCode.TailJump(continuation));return a.Finish();
         }
         static void Request(Assembler a,int request,int field,string label)
@@ -235,58 +237,60 @@ namespace AzerothTrainer
     {
         internal const string PrivilegeMessage="Cannot access the game. Run the trainer and game as the same Windows user and with matching administrator privileges. If the game is elevated, run the trainer as administrator too.";
         internal readonly Process Game;
+        internal string CompatibilitySummary {get{return layout.Summary;}}
         readonly IntPtr handle;
         readonly List<MemoryPatch> all=new List<MemoryPatch>(),rarity=new List<MemoryPatch>(),prices=new List<MemoryPatch>();
         readonly MemoryPatch run,xp,profile,health;
+        readonly GameLayout layout;
         uint talentSequence,marksSequence;
         bool disposed;
         internal bool Enabled {get {foreach(var p in all)if(p.Enabled)return true;return false;}}
         internal bool Exited {get {if(disposed)return true;try{return Game.HasExited;}catch(InvalidOperationException){return true;}}}
-        internal PatchSession(Process game,IntPtr imageBase)
+        internal PatchSession(Process game,IntPtr imageBase,GameLayout build)
         {
-            Game=game;handle=Native.OpenProcess(0x43A,false,game.Id);
+            Game=game;layout=build;handle=Native.OpenProcess(0x43A,false,game.Id);
             if(handle==IntPtr.Zero)throw Native.Error(PrivilegeMessage);
             try
             {
-                AddRarity(imageBase,RarityCode.HookRva,RarityCode.ContinueRva,RarityCode.Original,RarityCode.SelectionLength,0);
-                AddRarity(imageBase,0x5f74c3e,0x5f74fa0,RarityCode.Hex("44 0F 2E F0 0F 86 07 03 00 00 31 F6 48 83 3F FF"),0x36c,1);
-                AddRarity(imageBase,0x5f74cff,0x5f75270,RarityCode.Hex("44 0F 2E F0 0F 86 12 05 00 00 45 31 C9 E9 5F 05 00 00"),0x571,2);
-                IntPtr continuation=Native.Add(imageBase,RunCode.HookRva+RunCode.Original.Length);
-                run=new MemoryPatch(handle,game.Id,Native.Add(imageBase,RunCode.HookRva),RunCode.Original,RunCode.Original.Length,delegate(IntPtr c){return RunCode.Build(c,continuation,imageBase);},RunCode.HookRva);all.Add(run);
-                xp=AddGenerated(imageBase,XpCode.HookRva,XpCode.Original,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,XpCode.HookRva+XpCode.Original.Length));});
-                profile=AddGenerated(imageBase,ProfileCode.HookRva,ProfileCode.Original,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,ProfileCode.HookRva+ProfileCode.Original.Length),imageBase);});
-                health=AddGenerated(imageBase,HealthCode.HookRva,HealthCode.Original,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,HealthCode.HookRva+HealthCode.Original.Length));});
-                int[] branches={0x5eca83f,0x5ef6bbd,0x5f6e9e9,0x5f6fc3c,0x5f7a4b3};
-                int[] costs={0x5eca8bd,0x5ef6c3b,0x5f6ea67,0x5f6fcba,0x5f7a535};
+                layout.ValidateLive(handle,imageBase);
+                AddRarity(imageBase,layout.Site("Spell"),0);AddRarity(imageBase,layout.Site("Jewelry1"),1);AddRarity(imageBase,layout.Site("Jewelry2"),2);
+                HookSite tick=layout.Site("RunHook"),award=layout.Site("XpHook"),server=layout.Site("ProfileHook"),maximum=layout.Site("HealthHook");
+                run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
+                xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});
+                profile=AddGenerated(imageBase,server,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,server.Continuation),imageBase,layout);});
+                health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});
                 for(int i=0;i<5;i++)
                 {
-                    var branch=new MemoryPatch(handle,game.Id,Native.Add(imageBase,branches[i]),RarityCode.Hex(i==4?"45 85 C9 74 7D":"45 85 C0 74 79"),5,null);
-                    var cost=new MemoryPatch(handle,game.Id,Native.Add(imageBase,costs[i]),RarityCode.Hex(i==4?"BA 64 00 00 00":"B9 64 00 00 00"),5,null);
+                    HookSite branchSite=layout.Site("PriceBranch"+i),costSite=layout.Site("PriceCost"+i);
+                    var branch=new MemoryPatch(handle,game.Id,Native.Add(imageBase,branchSite.Rva),branchSite.Original,branchSite.Guard,null);
+                    var cost=new MemoryPatch(handle,game.Id,Native.Add(imageBase,costSite.Rva),costSite.Original,costSite.Guard,null);
                     prices.Add(branch);prices.Add(cost);all.Add(branch);all.Add(cost);
                 }
-                foreach(var p in all)p.Validate();
-                if(!Native.Equal(Native.Read(handle,Native.Add(imageBase,RunCode.CoopRva),RunCode.CoopOriginal.Length),RunCode.CoopOriginal))throw new Exception("An older trainer has modified the co-op step. Close it normally before connecting.");
-                if(!Native.Equal(Native.Read(handle,Native.Add(imageBase,RunCode.HudRva),RunCode.HudOriginal.Length),RunCode.HudOriginal))throw new Exception("An older trainer has modified the HUD function. Close it normally before connecting.");
+                foreach(var patch in all)patch.Validate();
+                foreach(string name in new string[]{"GuardCoop","GuardHud"})
+                {
+                    var guard=layout.Site(name);
+                    if(!Native.Equal(Native.Read(handle,Native.Add(imageBase,guard.Rva),guard.Original.Length),guard.Original))throw new Exception("Another trainer has modified the game. Disable it before connecting.");
+                }
             }
             catch{Native.CloseHandle(handle);throw;}
         }
-        void AddRarity(IntPtr b,int hook,int target,byte[] original,int guard,int variant)
+        void AddRarity(IntPtr image,HookSite site,int variant)
         {
-            IntPtr end=Native.Add(b,target);
-            var p=new MemoryPatch(handle,Game.Id,Native.Add(b,hook),original,guard,delegate(IntPtr unused){return RarityCode.Build(end,variant);},hook);rarity.Add(p);all.Add(p);
+            var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,delegate(IntPtr unused){return RarityCode.Build(Native.Add(image,site.Continuation),variant);},site.Rva);
+            rarity.Add(patch);all.Add(patch);
         }
-        MemoryPatch AddGenerated(IntPtr image,int rva,byte[] original,Func<IntPtr,byte[]> code)
-        {var p=new MemoryPatch(handle,Game.Id,Native.Add(image,rva),original,original.Length,code,rva);all.Add(p);return p;}
+        MemoryPatch AddGenerated(IntPtr image,HookSite site,Func<IntPtr,byte[]> code)
+        {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva);all.Add(patch);return patch;}
         internal static PatchSession Attach()
         {
             Process selected=GameLocator.FindRunning();
             if(selected==null)throw new Exception("Start Azeroth Survivors yourself or click Launch game, then enable the trainer.");
             try
             {
-                var module=selected.MainModule;string path=module.FileName,hash;
-                using(var sha=SHA256.Create())using(var file=File.OpenRead(path))hash=BitConverter.ToString(sha.ComputeHash(file)).Replace("-","").ToLowerInvariant();
-                if(hash!=RarityCode.SupportedHash)throw new Exception("This game build is unsupported. Verified offsets are required after a game update.");
-                GameLocator.Remember(path);return new PatchSession(selected,module.BaseAddress);
+                var module=selected.MainModule;string path=module.FileName;
+                var layout=GameLayout.Load(path);GameLocator.Remember(path);
+                return new PatchSession(selected,module.BaseAddress,layout);
             }
             catch{selected.Dispose();throw;}
         }
@@ -375,8 +379,8 @@ namespace AzerothTrainer
             ulong state=BitConverter.ToUInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),8),0);
             IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0));
             if(owner==IntPtr.Zero)throw new Exception("Enter a live run before sending a run action.");
-            byte phase=Native.Read(handle,Native.Add(owner,0xf63),1)[0];
-            float hp=BitConverter.ToSingle(Native.Read(handle,Native.Add(owner,0x568),4),0);
+            byte phase=Native.Read(handle,Native.Add(owner,layout.Field("phase")),1)[0];
+            float hp=BitConverter.ToSingle(Native.Read(handle,Native.Add(owner,layout.Field("hp")),4),0);
             if((phase!=1&&phase!=2)||!(hp>0))throw new Exception("Enter a live run before sending a run action.");
             run.Data(offset,BitConverter.GetBytes(RunCommands.Pack(state,BitConverter.ToUInt32(bytes,0))));
         }

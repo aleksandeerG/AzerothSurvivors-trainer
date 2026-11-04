@@ -15,10 +15,10 @@ namespace AzerothTrainer
         internal static void Track(Assembler a)
         {
             // RSI = Game; RAX = data. Active states are running/offer (1/2).
-            a.Emit("F3 0F 10 86 A0 0E 00 00"); // movss xmm0,[rsi+EA0] (clock)
-            a.Emit("44 0F B6 96 63 0F 00 00 41 FF CA 41 83 FA 01"); // movzx r10d,state; dec r10d; cmp r10d,1
+            a.Emit("F3 0F 10 86 $clock"); // movss xmm0,[rsi+clock]
+            a.Emit("44 0F B6 96 $phase 41 FF CA 41 83 FA 01"); // movzx r10d,state; dec r10d; cmp r10d,1
             a.Branch("0F 87","commandsInactive");
-            a.Emit("0F 57 D2 F3 0F 10 8E 68 05 00 00 0F 2E CA"); // xorps xmm2,xmm2; movss xmm1,HP; ucomiss xmm1,xmm2
+            a.Emit("0F 57 D2 F3 0F 10 8E $hp 0F 2E CA"); // xorps xmm2,xmm2; movss xmm1,HP; ucomiss xmm1,xmm2
             a.Branch("0F 86","commandsInactive"); // dead/NaN HP must not consume queued actions
             a.Emit("48 39 70 60");a.Branch("0F 85","commandsEpoch"); // cmp [rax+Owner],rsi
             a.Emit("0F 2E 40 68");a.Branch("0F 82","commandsEpoch"); // ucomiss clock,[rax+LastClock]

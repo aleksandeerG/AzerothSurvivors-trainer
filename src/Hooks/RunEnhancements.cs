@@ -38,7 +38,7 @@ namespace AzerothTrainer
             new RunStat("DoT haste bonus","%",0x614,2,0,1000,100),
             new RunStat("Kill heal","HP / kill",0x608,0,0,100000,50)
         };
-        internal static void Emit(Assembler a)
+        internal static void Emit(Assembler a,GameLayout layout)
         {
             for(int i=0;i<All.Length;i++)
             {
@@ -48,14 +48,14 @@ namespace AzerothTrainer
                 if(stat.Kind>=4)
                 {
                     a.Emit("44 8B 90");a.Bytes.AddRange(BitConverter.GetBytes(at)); // mov r10d,[rax+minimum]
-                    a.Emit("44 3B 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));a.Branch("0F 86",done); // cmp r10d,[rsi+stat]; jbe done
-                    a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // mov [rsi+stat],r10d
+                    a.Emit("44 3B 96");a.Bytes.AddRange(BitConverter.GetBytes(layout.StatField(stat.Field)));a.Branch("0F 86",done); // cmp r10d,[rsi+stat]; jbe done
+                    a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(layout.StatField(stat.Field))); // mov [rsi+stat],r10d
                 }
                 else
                 {
                     a.Emit("F3 0F 10 80");a.Bytes.AddRange(BitConverter.GetBytes(at)); // movss xmm0,[rax+minimum]
-                    a.Emit(stat.Kind==3?"F3 0F 5D 86":"F3 0F 5F 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // minss cooldown factor / maxss ordinary stat
-                    a.Emit("F3 0F 11 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // movss [rsi+stat],xmm0
+                    a.Emit(stat.Kind==3?"F3 0F 5D 86":"F3 0F 5F 86");a.Bytes.AddRange(BitConverter.GetBytes(layout.StatField(stat.Field))); // minss cooldown factor / maxss ordinary stat
+                    a.Emit("F3 0F 11 86");a.Bytes.AddRange(BitConverter.GetBytes(layout.StatField(stat.Field))); // movss [rsi+stat],xmm0
                 }
                 a.Label(done);
             }
@@ -63,21 +63,21 @@ namespace AzerothTrainer
     }
     internal static class AutoPickCode
     {
-        internal const int ChooseRva=0x5f76700,SpellMode=56,ItemMode=60,Owner=64,Offer=72,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92;
+        internal const int SpellMode=56,ItemMode=60,Owner=64,Offer=72,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92;
         internal static readonly string[] Rules={"Left card","Middle card","Right card","Random card","Highest rarity (leftmost tie)"};
-        internal static void Emit(Assembler a,IntPtr start,IntPtr image)
+        internal static void Emit(Assembler a,IntPtr start,IntPtr image,GameLayout layout)
         {
-            a.Emit("80 BE 63 0F 00 00 02");a.Branch("0F 85","autoReset");
-            a.Emit("80 BE 5E 0F 00 00 00");a.Branch("0F 84","autoLive");a.Emit("80 BE 64 0F 00 00 01");a.Branch("0F 85","autoReset");a.Label("autoLive");
-            a.Emit("83 BE 68 05 00 00 00");a.Branch("0F 8E","autoReset");
-            a.Emit("0F B6 96 61 0F 00 00 83 FA 02");a.Branch("0F 87","autoReset");
+            a.Emit("80 BE $phase 02");a.Branch("0F 85","autoReset");
+            a.Emit("80 BE $coop 00");a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase 01");a.Branch("0F 85","autoReset");a.Label("autoLive");
+            a.Emit("83 BE $hp 00");a.Branch("0F 8E","autoReset");
+            a.Emit("0F B6 96 $offerKind 83 FA 02");a.Branch("0F 87","autoReset");
             a.Emit("44 8B 40 38 85 D2");a.Branch("0F 84","autoMode");a.Emit("44 8B 40 3C");
             a.Label("autoMode");a.Emit("45 85 C0");a.Branch("0F 84","autoReset");
-            a.Emit("4C 8B 9E 40 07 00 00 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset"); // mov r11,offer count; require 1..3
-            a.Emit("4C 8B 8E 38 07 00 00 4D 85 C9");a.Branch("0F 84","autoReset"); // mov r9,offer vector; test r9,r9
+            a.Emit("4C 8B 9E $offerCount 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset"); // mov r11,offer count; require 1..3
+            a.Emit("4C 8B 8E $offers 4D 85 C9");a.Branch("0F 84","autoReset"); // mov r9,offer vector; test r9,r9
             a.Emit("48 39 70 40");a.Branch("0F 85","autoOffer");
-            a.Emit("8B 96 CC 0E 00 00 3B 50 48");a.Branch("0F 84","autoWait");
-            a.Label("autoOffer");a.Emit("48 89 70 40 8B 96 CC 0E 00 00 89 50 48 C7 40 4C 00 00 00 00");
+            a.Emit("8B 96 $offerNumber 3B 50 48");a.Branch("0F 84","autoWait");
+            a.Label("autoOffer");a.Emit("48 89 70 40 8B 96 $offerNumber 89 50 48 C7 40 4C 00 00 00 00");
             a.Label("autoWait");a.Emit("F3 0F 10 44 24 78 0F 57 D2 F3 0F 5F C2 F3 0F 5D 40 5C F3 0F 58 40 4C F3 0F 11 40 4C 0F 2E 40 50");a.Branch("0F 82","autoDone"); // clamp real dt, accumulate elapsed, ucomiss against delay
             a.Emit("C7 40 4C 00 00 00 00 41 83 F8 05");a.Branch("0F 84","autoHighest");a.Emit("41 83 F8 04");a.Branch("0F 84","autoRandom");
             a.Emit("41 8D 50 FF 41 8D 4B FF 39 CA 0F 47 D1");a.Branch("E9","autoChoose"); // EDX=min(mode-1,count-1), using lea/cmp/cmova
@@ -85,7 +85,7 @@ namespace AzerothTrainer
             a.Label("autoHighest");a.Emit("31 C9 31 D2 45 8B 91 98 00 00 00");
             a.Label("autoScan");a.Emit("41 8B 81 98 00 00 00 44 39 D0");a.Branch("0F 86","autoNext");a.Emit("41 89 C2 89 CA");
             a.Label("autoNext");a.Emit("49 81 C1 A0 00 00 00 FF C1 44 39 D9");a.Branch("0F 82","autoScan");
-            a.Label("autoChoose");a.Emit("48 89 F1");FrameCode.Call(a,Native.Add(image,ChooseRva)); // RCX=Game, EDX=card index; call normal choice handler
+            a.Label("autoChoose");a.Emit("48 89 F1");FrameCode.Call(a,Native.Add(image,layout.Rva("Choose"))); // RCX=Game, EDX=card index; call normal choice handler
             FrameCode.Pointer(a,Native.Add(start,4096));a.Emit("FF 40 58");a.Branch("E9","autoDone");
             a.Label("autoReset");a.Emit("C7 40 4C 00 00 00 00 48 C7 40 40 00 00 00 00");
             a.Label("autoDone");FrameCode.Pointer(a,Native.Add(start,4096));

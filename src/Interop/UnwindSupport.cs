@@ -16,7 +16,8 @@ namespace AzerothTrainer
         {
             lock(gate)
             {
-                string key=Path.GetFullPath(gamePath)+"|"+sourceRva;
+                var fileInfo=new FileInfo(gamePath);
+                string key=Path.GetFullPath(gamePath)+"|"+fileInfo.Length+"|"+fileInfo.LastWriteTimeUtc.Ticks+"|"+sourceRva;
                 byte[] cached;if(frames.TryGetValue(key,out cached))return (byte[])cached.Clone();
                 byte[] info;
                 using(var file=File.OpenRead(gamePath))
