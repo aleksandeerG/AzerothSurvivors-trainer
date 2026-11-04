@@ -8,14 +8,25 @@ namespace AzerothTrainer
         internal readonly string Name,Hash,Frame;
         internal readonly int Size;
         internal readonly int[] Masks;
+        internal readonly FieldOperand[] Operands;
         internal readonly FunctionSpec Previous;
-        internal FunctionSpec(string name,int size,string hash,string masks,string frame,FunctionSpec previous=null)
-        {Name=name;Size=size;Hash=hash;Frame=frame;Masks=String.IsNullOrEmpty(masks)?new int[0]:Array.ConvertAll(masks.Split(','),Int32.Parse);Previous=previous;}
-        internal bool Matches(GameImage image,ImageFunction function)
+        internal FunctionSpec(string name,int size,string hash,string masks,string frame,FunctionSpec previous=null,string operands="")
+        {Name=name;Size=size;Hash=hash;Frame=frame;Masks=String.IsNullOrEmpty(masks)?new int[0]:Array.ConvertAll(masks.Split(','),Int32.Parse);Previous=previous;Operands=String.IsNullOrEmpty(operands)?new FieldOperand[0]:Array.ConvertAll(operands.Split(','),s=>new FieldOperand(s));}
+        internal bool Matches(GameImage image,ImageFunction function,MemoryContracts memory)
         {
             if(function.Length!=Size)return false;
             byte[] body=image.Read(function.Start,Size),normalized=(byte[])body.Clone();
             foreach(int at in Masks){if(at<0||at+4>body.Length)throw new Exception("Invalid signature mask.");Array.Clear(normalized,at,4);}
+            var discovered=new Dictionary<string,int>();
+            foreach(var operand in Operands)
+            {
+                if(operand.Position<0||operand.Position+4>body.Length)throw new Exception("Invalid memory operand position.");
+                int displacement=BitConverter.ToInt32(body,operand.Position),previous;
+                if(!memory.Valid(operand,displacement))return false;
+                int start=checked(displacement-operand.Relative);
+                if(discovered.TryGetValue(operand.Group,out previous)&&previous!=start)return false;
+                discovered[operand.Group]=start;Array.Clear(normalized,operand.Position,4);
+            }
             if(GameImage.Digest(normalized)!=Hash)return false;
             foreach(int at in Masks)
             {
@@ -60,6 +71,8 @@ namespace AzerothTrainer
         sealed class MatchedFunction
         {
             internal ImageFunction Range;internal byte[] Body;internal int[] Relocations;
+            internal FunctionSpec Signature;internal LayoutSpec Source;
+            internal readonly HashSet<string> Origins=new HashSet<string>();
         }
         readonly Dictionary<string,MatchedFunction> functions=new Dictionary<string,MatchedFunction>();
         readonly Dictionary<string,HookSite> sites=new Dictionary<string,HookSite>();
@@ -72,32 +85,46 @@ namespace AzerothTrainer
             {TrainerFeature.RunControls,new[]{"Run","Coop","Xp","Health","Choose"}},
             {TrainerFeature.ClassProgression,new[]{"Profile","ProfileActions","EnsureClass","SaveProfile","SerializeProfile","GrowMarks"}}
         };
-        readonly LayoutSpec spec;
+        readonly MemoryContracts memory;
         readonly long preferredBase;
         internal readonly string Hash,Name;
-        internal bool Updated {get{return spec.Updated;}}
-        GameLayout(GameImage image,LayoutSpec layout)
+        internal bool Updated {get{return functions.ContainsKey("Health")&&functions["Health"].Source.Updated;}}
+        GameLayout(GameImage image)
         {
-            spec=layout;Name=layout.Name;Hash=image.Hash;preferredBase=image.PreferredBase;
-            foreach(var signature in layout.Functions)
+            Hash=image.Hash;preferredBase=image.PreferredBase;memory=new MemoryContracts();
+            foreach(string name in BuildCatalog.Layouts.SelectMany(l=>l.Functions).Select(f=>f.Name).Distinct())
             {
-                ImageFunction found=null;
-                for(int index=0;index<image.Functions.Count;index++)
+                MatchedFunction found=null;bool ambiguous=false;
+                foreach(var layout in BuildCatalog.Layouts)
                 {
-                    var candidate=image.Functions[index];
-                    try
+                    var signature=layout.Functions.FirstOrDefault(f=>f.Name==name);if(signature==null)continue;
+                    for(int index=0;index<image.Functions.Count;index++)
                     {
-                        if(!signature.Matches(image,candidate))continue;
-                        if(signature.Previous!=null&&(index==0||!signature.Previous.Matches(image,image.Functions[index-1])))continue;
+                        var candidate=image.Functions[index];
+                        try
+                        {
+                            if(!signature.Matches(image,candidate,memory))continue;
+                            if(signature.Previous!=null&&(index==0||!signature.Previous.Matches(image,image.Functions[index-1],memory)))continue;
+                        }
+                        catch(Exception ex){failures[name]="unverifiable context: "+ex.Message;continue;}
+                        if(found!=null)
+                        {
+                            if(found.Range.Start!=candidate.Start||!Equivalent(found,layout,signature)){ambiguous=true;continue;}
+                            found.Origins.Add(layout.Name);continue;
+                        }
+                        found=new MatchedFunction{Range=candidate,Body=image.Read(candidate.Start,candidate.Length),Signature=signature,Source=layout,
+                            Relocations=image.Relocations.Where(r=>r>=candidate.Start&&r+8<=candidate.Start+candidate.Length).Select(r=>r-candidate.Start).ToArray()};
+                        found.Origins.Add(layout.Name);
                     }
-                    catch(Exception ex){failures[signature.Name]="unverifiable context: "+ex.Message;continue;}
-                    if(found!=null){failures[signature.Name]="ambiguous function signature";found=null;break;}
-                    found=candidate;
                 }
-                if(found==null){if(!failures.ContainsKey(signature.Name))failures[signature.Name]="code or stack layout has changed";continue;}
-                functions.Add(signature.Name,new MatchedFunction{Range=found,Body=image.Read(found.Start,found.Length),Relocations=image.Relocations.Where(r=>r>=found.Start&&r+8<=found.Start+found.Length).Select(r=>r-found.Start).ToArray()});
+                if(ambiguous){failures[name]="ambiguous function signature or hook contract";continue;}
+                if(found==null){if(!failures.ContainsKey(name))failures[name]="code, member spacing or stack layout has changed";continue;}
+                functions.Add(name,found);memory.Observe(name,found.Signature.Operands,found.Body);
+                foreach(var site in found.Source.Sites.Where(s=>s.Function==name))sites.Add(site.Name,new HookSite(image,found.Range,site));
             }
-            foreach(var site in layout.Sites)if(functions.ContainsKey(site.Function))sites.Add(site.Name,new HookSite(image,functions[site.Function].Range,site));
+            var origins=new HashSet<string>(BuildCatalog.Layouts.Select(l=>l.Name));
+            foreach(var function in functions.Values)origins.IntersectWith(function.Origins);
+            Name=origins.Count==0?"Discovered desktop contracts":origins.OrderBy(s=>s).First();
             // Explicitly tie the injected callbacks to the game's existing call
             // graph. Matching a byte sequence elsewhere must not select a helper.
             foreach(var feature in requirements)
@@ -106,43 +133,45 @@ namespace AzerothTrainer
                 if(missing.Length!=0){unavailable[feature.Key]=String.Join(", ",missing.Select(name=>name+": "+failures[name]).ToArray());continue;}
                 try
                 {
-                    if(feature.Key==TrainerFeature.RunControls){ValidateEdge("Xp","Health");ValidateEdge("Run","Coop");}
+                    if(feature.Key==TrainerFeature.RunControls)
+                    {
+                        ValidateEdge("Xp","Health");ValidateEdge("Run","Coop");
+                        memory.Require("Attributes","Offers","Clock","OfferNumber","Banishes","Phase","Coop","OfferKind","CoopPhase");
+                    }
                     if(feature.Key==TrainerFeature.ClassProgression)
                     {
                         ValidateEdge("Profile","ProfileActions");ValidateEdge("ProfileActions","EnsureClass");
                         ValidateEdge("ProfileActions","SaveProfile");ValidateEdge("SaveProfile","SerializeProfile");
+                        memory.Require("Profile");
                     }
                 }
                 catch(Exception ex){unavailable[feature.Key]=ex.Message;}
             }
         }
+        static bool Equivalent(MatchedFunction found,LayoutSpec layout,FunctionSpec signature)
+        {
+            var previous=found.Signature;
+            if(previous.Hash!=signature.Hash||previous.Size!=signature.Size||previous.Frame!=signature.Frame||!previous.Masks.SequenceEqual(signature.Masks))return false;
+            Func<FieldOperand,string> operand=o=>o.Group+":"+o.Position+":"+o.Relative+":"+o.Width;
+            if(!previous.Operands.Select(operand).SequenceEqual(signature.Operands.Select(operand)))return false;
+            if(signature.Name=="Health"&&found.Source.Updated!=layout.Updated)return false;
+            Func<SiteSpec,string> site=s=>s.Name+":"+s.Offset+":"+s.Size+":"+s.Continuation+":"+s.Guard;
+            return found.Source.Sites.Where(s=>s.Function==signature.Name).Select(site).SequenceEqual(layout.Sites.Where(s=>s.Function==signature.Name).Select(site));
+        }
         void ValidateEdge(string caller,string callee)
         {
             var source=functions[caller];int target=functions[callee].Range.Start;
             // Relative call/jump operands are the only masked E8/E9 references.
-            var signature=spec.Functions.First(f=>f.Name==caller);
+            var signature=Template(caller);
             foreach(int displacement in signature.Masks)
                 if(displacement>0&&(source.Body[displacement-1]==0xe8||source.Body[displacement-1]==0xe9)&&source.Range.Start+displacement+4+BitConverter.ToInt32(source.Body,displacement)==target)return;
             throw new Exception(caller+": expected call to "+callee+" was not found.");
         }
         internal static GameLayout Load(string path)
         {
-            var image=new GameImage(path);var failures=new List<string>();GameLayout best=null;bool tied=false;
-            foreach(var layout in BuildCatalog.Layouts)
-            {
-                try
-                {
-                    var candidate=new GameLayout(image,layout);
-                    failures.Add(candidate.Details);
-                    if(candidate.AvailableCount==0)continue;
-                    if(best==null||candidate.AvailableCount>best.AvailableCount){best=candidate;tied=false;}
-                    else if(candidate.AvailableCount==best.AvailableCount)tied=true;
-                }
-                catch(Exception ex){failures.Add(layout.Name+": "+ex.Message);}
-            }
-            if(best!=null&&!tied)return best;
-            var error=new Exception(tied?"Game layout selection is ambiguous. No hooks were selected. An updated trainer is required.":"No trainer features match this game safely. An updated trainer is required. Run --verify-files for details.");
-            error.Data["CompatibilityDetails"]=String.Join(Environment.NewLine,failures.ToArray());throw error;
+            var candidate=new GameLayout(new GameImage(path));if(candidate.AvailableCount>0)return candidate;
+            var error=new Exception("No trainer features match this game safely. An updated trainer is required. Run --verify-files for details.");
+            error.Data["CompatibilityDetails"]=candidate.Details;throw error;
         }
         internal bool HasSite(string name){return sites.ContainsKey(name);}
         internal bool Supports(TrainerFeature feature){return requirements.ContainsKey(feature)&&!unavailable.ContainsKey(feature);}
@@ -162,36 +191,10 @@ namespace AzerothTrainer
         internal string UnavailableNames {get{return String.Join("; ",unavailable.Keys.Select(FeatureName).ToArray());}}
         internal HookSite Site(string name){return sites[name];}
         internal int Rva(string function){return functions[function].Range.Start;}
+        internal FunctionSpec Template(string function){return functions[function].Signature;}
         internal int HealthRegister {get{return Updated?14:6;}}
-        internal int Field(string name)
-        {
-            switch(name)
-            {
-                case "hp":return Updated?0x5f8:0x568;
-                case "xp":return Updated?0x5f4:0x564;
-                case "shield":return Updated?0x5fc:0x56c;
-                case "gold":return Updated?0x608:0x578;
-                case "maxHp":return Updated?0x658:0x5c8;
-                case "rerolls":return Updated?0x6bc:0x62c;
-                case "banishes":return Updated?0x10b4:0xf30;
-                case "phase":return Updated?0x10e9:0xf63;
-                case "coop":return Updated?0x10e3:0xf5e;
-                case "offerKind":return Updated?0x10e7:0xf61;
-                case "coopPhase":return Updated?0x10ea:0xf64;
-                case "offers":return Updated?0x860:0x738;
-                case "offerCount":return Updated?0x868:0x740;
-                case "offerNumber":return Updated?0x1054:0xecc;
-                case "clock":return Updated?0x1028:0xea0;
-                case "profile":return Updated?0x15f0:0x1400;
-                case "talentData":return Field("profile")+0x68;
-                case "talentCount":return Field("profile")+0x70;
-                case "marksCapacity":return Field("profile")+0x180;
-                case "marksData":return Field("profile")+0x188;
-                case "marksCount":return Field("profile")+0x190;
-                default:throw new Exception("Unknown game field: "+name);
-            }
-        }
-        internal int StatField(int reference){return Updated?reference+0x90:reference;}
+        internal int Field(string name){return memory.Field(name);}
+        internal int StatField(int reference){return memory.StatField(reference);}
         internal void ValidateLive(IntPtr handle,IntPtr imageBase)
         {
             long delta=imageBase.ToInt64()-preferredBase;
@@ -202,10 +205,10 @@ namespace AzerothTrainer
                 if(!Native.Equal(expected,Native.Read(handle,Native.Add(imageBase,function.Range.Start),expected.Length)))throw new Exception(entry.Key+": running game code differs from the validated executable. Disable other trainers or restart the game.");
             }
         }
-        internal string Summary {get{return Name+"; "+AvailableCount+"/5 feature groups available; "+functions.Count+"/18 function signatures and "+sites.Count+" hook/guard sites validated. SHA-256 "+Hash;}}
+        internal string Summary {get{return Name+"; "+AvailableCount+"/5 feature groups available; "+functions.Count+"/18 function contracts and "+sites.Count+" hook/guard sites validated. SHA-256 "+Hash;}}
         internal string Details
         {
-            get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,requirements.Keys.Select(feature=>FeatureName(feature)+": "+(Supports(feature)?"available":"UNAVAILABLE: "+unavailable[feature])).ToArray());}
+            get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,requirements.Keys.Select(feature=>FeatureName(feature)+": "+(Supports(feature)?"available":"UNAVAILABLE: "+unavailable[feature])).ToArray())+Environment.NewLine+"Discovered memory regions:"+Environment.NewLine+memory.Details+Environment.NewLine+"Function contracts:"+Environment.NewLine+String.Join(Environment.NewLine,functions.Select(f=>f.Key+": RVA 0x"+f.Value.Range.Start.ToString("x")+"; "+String.Join(" / ",f.Value.Origins.OrderBy(n=>n).ToArray())).ToArray());}
         }
     }
 }

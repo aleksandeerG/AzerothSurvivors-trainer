@@ -9,7 +9,7 @@ Control legendary chances, reroll prices, run speed, XP, resources, automatic of
 ## Requirements
 
 - 64-bit Windows with .NET Framework 4.5 or newer (4.8 recommended).
-- A desktop game with a recognized code and memory layout. Both verified layouts below are supported, and compatible builds can be discovered after their code addresses move.
+- A desktop game whose functions match the verified instruction contracts. Both reference builds below are supported; compatible updates can move code and memory regions or combine known function variants.
 - The supported game installed anywhere on your PC. The trainer can run from any folder.
 - The trainer and game running as the same Windows user with matching administrator privileges.
 
@@ -114,11 +114,15 @@ Select a class, then set earned points (0-51) or marks. Changes are permanent, w
 
 ## Compatibility and lifecycle
 
-The trainer discovers functions through the executable's runtime-function table and complete code fingerprints. A fully supported build validates 18 function bodies, their stack-unwind information, required callback relationships, 17 patch sites, and two guards. It resolves addresses and selects the matching memory layout automatically. Before enabling, matched live function bodies must agree with the validated file, allowing for Windows ASLR relocations.
+The trainer discovers functions through the executable's runtime-function table and complete instruction contracts. A fully supported build validates 18 function bodies, their stack-unwind information, required callback relationships, 17 patch sites, and two guards. Before enabling, matched live function bodies must agree with the validated file, allowing for Windows ASLR relocations.
 
-Compatibility is checked independently for five groups: **spell chance**, **item chance**, **reroll cost**, **run controls/stats/auto-pick**, and **class progression**. If an update breaks one group, verified groups can still work. Run options stay together because their shared hook requires the same complete set of validated functions and field offsets. Layouts are never mixed to fill missing matches.
+Memory locations are extracted from reviewed instruction operands. Ten independently located regions cover health/resources/stats, offers, the clock, offer counters, run states, and progression. References within each region must preserve their verified member spacing; references across functions must agree. Alignment, size limits, and overlapping regions are checked before dependent hooks become available. Generated hooks use these discovered locations, including all 20 stat minimums and profile edits.
 
-Connect normally. Unsupported options are cleared and disabled, with a persistent notice naming unavailable groups. Detailed reasons are written by the compatibility commands below. If no group is verified, or the layout choice is ambiguous, connecting is refused.
+Compatibility is checked independently for five groups: **spell chance**, **item chance**, **reroll cost**, **run controls/stats/auto-pick**, and **class progression**. If an update breaks one group, verified groups can still work. Run options stay together because their shared hook requires a complete set of validated functions and memory regions. A missing function can also remove the only witness for a field used by another group.
+
+Each function can match either reference variant independently. Known variants can coexist when their operands agree and their required calls lead to the selected helpers. Each hook keeps the patch boundaries, live registers, and stack contract of its own matched variant. Equivalent matches at the same address are deduplicated; competing addresses or conflicting hook contracts disable the dependent group.
+
+Connect normally. Unsupported options are cleared and disabled, with a persistent notice naming unavailable groups. Detailed reasons are written by the compatibility commands below. Ambiguous functions disable their dependent groups. If no group is verified, connecting is refused.
 
 SHA-256 identifies the executable in diagnostics; it is **not a version whitelist**. These are the verified reference builds:
 
@@ -127,7 +131,9 @@ SHA-256 identifies the executable in diagnostics; it is **not a version whitelis
 | Original desktop layout | `0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908` |
 | Updated desktop layout | `6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa` |
 
-This supports compatible address changes and retains verified groups through partial updates. Fingerprints mask four-byte PC-relative addresses while keeping instructions, field offsets, internal branches, and stack layouts exact. Missing or ambiguous matches, changed fields, altered callback relationships, and changed unwind data disable dependent groups. Restoring those groups still requires a verified layout/signature update. No offsets are guessed, and there is no force-enable option.
+This supports compatible code relocation, independent memory-region movement, combinations of known function variants, and partial updates. Matching normalizes four-byte PC-relative addresses and reviewed memory displacements. Instructions, registers, member spacing, record formats, internal branches, and stack layouts remain exact. Changes to those contracts still need a verified trainer update. Arbitrary register allocation, instruction reordering, new game logic, or a different engine/architecture are not automatically supported. No release can guarantee compatibility with every future version; there is no force-enable option.
+
+Local verification covers both reference executables, copies with all ten regions moved independently and together, and a copy combining original and updated function contracts. Native hook checks exercise those layouts in isolated memory. These synthetic copies demonstrate supported change classes; they do not establish compatibility with an untested future release. Verification fixtures and tools stay outside the tracked repository.
 
 Run the trainer and game as the same Windows user with matching administrator privileges. Joining co-op clients cannot control the host's simulation. If the trainer is forcibly terminated while enabled, restart the game to remove its hooks.
 
@@ -146,7 +152,7 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-files` works with the game closed. It checks complete function fingerprints, required call relationships, unwind data, and hook contexts. Its report lists each group's availability, reasons for unavailable groups, the selected layout, and the executable hash. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
+`--verify-files` works with the game closed. It checks instruction contracts, required call relationships, unwind data, discovered memory regions, and hook contexts. Its report lists each group's availability, reasons for unavailable groups, field witnesses, selected function variants and addresses, and the executable hash. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
 
 To inspect an already running game, close other trainers normally and run:
 
@@ -194,8 +200,9 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | `src/Program.cs` | Windows Forms entry point and compatibility command dispatch |
 | `src/Game/GameLocator.cs` | Running-game discovery and remembered installation location |
 | `src/Game/GameImage.cs` | PE sections, runtime-function ranges, executable hashing, and ASLR relocation parsing |
-| `src/Game/GameLayout.cs` | Independent feature-group matching, callback checks, memory layouts, and live validation |
-| `src/Game/BuildCatalog.cs` | Verified function fingerprints and hook contexts for supported layouts |
+| `src/Game/GameLayout.cs` | Independent function-variant selection, feature dependencies, callback checks, and live validation |
+| `src/Game/MemoryContracts.cs` | Operand extraction, region agreement/alignment/bounds checks, and discovered field access |
+| `src/Game/BuildCatalog.cs` | Verified instruction and memory-operand contracts, hook boundaries, and reference variants |
 | `src/UI/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
 | `src/Hooks/HookEngine.cs` | Layout-aware instruction assembly, patch lifecycle, session management, resources, and profile backups |
 | `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |

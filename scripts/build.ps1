@@ -24,6 +24,7 @@ $sourceFiles = @(
     'src\Game\GameLocator.cs'
     'src\Game\GameImage.cs'
     'src\Game\GameLayout.cs'
+    'src\Game\MemoryContracts.cs'
     'src\Game\BuildCatalog.cs'
     'src\UI\TrainerWindow.cs'
     'src\Hooks\HookEngine.cs'
