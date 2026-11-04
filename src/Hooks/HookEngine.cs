@@ -18,12 +18,6 @@ namespace AzerothTrainer
             string[] parts=s.Split(new char[]{' '},StringSplitOptions.RemoveEmptyEntries);
             byte[] b=new byte[parts.Length];for(int i=0;i<b.Length;i++)b[i]=Convert.ToByte(parts[i],16);return b;
         }
-        internal static byte[] Jump(IntPtr target,int size)
-        {
-            if(size<14)throw new ArgumentOutOfRangeException("size");
-            var b=new List<byte>(Hex("FF 25 00 00 00 00"));b.AddRange(BitConverter.GetBytes(target.ToInt64()));
-            while(b.Count<size)b.Add(0x90);return b.ToArray();
-        }
         internal static byte[] EntryJump(IntPtr target,int size)
         {
             // RAX is dead at each verified entry site. A register-indirect jump
@@ -38,7 +32,6 @@ namespace AzerothTrainer
             var b=new List<byte>(Hex("C7 44 24 08"));byte[] pointer=BitConverter.GetBytes(target.ToInt64());
             for(int i=0;i<4;i++)b.Add(pointer[i]);b.AddRange(Hex("C7 44 24 0C"));for(int i=4;i<8;i++)b.Add(pointer[i]);b.AddRange(Hex("FF 64 24 08"));return b.ToArray();
         }
-        internal static IntPtr JumpTarget(byte[] code){return new IntPtr(BitConverter.ToInt64(code,code[0]==0x48?2:6));}
         internal static byte[] Build(IntPtr continuation,int variant)
         {
             // 0: spells -> EAX; 1: jewelry -> ESI; 2: jewelry -> R9D.
@@ -87,36 +80,39 @@ namespace AzerothTrainer
         internal static readonly byte[] CoopOriginal=RarityCode.Hex("0F 28 F1 49 89 CD F3 0F 11 8D 00 17 00 00");
         internal static readonly byte[] Original=SpeedCode.Original;
         internal static readonly byte[] HudOriginal=RarityCode.Hex("48 C7 85 68 02 00 00 FE FF FF FF 48 89 D6");
-        internal const int BanishRequest=8,GoldRequest=12,UnlimitedBanish=16,UnlimitedReroll=20;
-        internal const int FreeRerollRequest=24,ShieldRequest=28,HealRequest=32,AutoHeal=36,XpRequest=40,DamageMinimum=44,PickupMinimum=48,AdvanceRequest=52;
+        internal const int UnlimitedBanish=16,UnlimitedReroll=20,AutoHeal=36;
+        // Aligned 64-bit mailboxes: high word = run epoch, low word = value bits.
+        internal const int BanishRequest=320,GoldRequest=328,FreeRerollRequest=336,ShieldRequest=344,HealRequest=352,XpRequest=360,AdvanceRequest=368;
         internal static byte[] Build(IntPtr start,IntPtr continuation,IntPtr image)
         {
-            var a=new Assembler();a.Emit("F3 0F 11 4C 24 78");SpeedCode.Emit(a);FrameCode.Save(a);
-            a.Emit("44 0F B6 96 63 0F 00 00 41 FF CA 41 83 FA 01");a.Branch("0F 87","runDone");
-            FrameCode.Pointer(a,Native.Add(start,4096));
+            var a=new Assembler();a.Emit("F3 0F 11 4C 24 78"); // movss [rsp+78],xmm1 (unscaled frame time)
+            SpeedCode.Emit(a);FrameCode.Save(a);FrameCode.Pointer(a,Native.Add(start,4096));
+            RunCommands.Track(a);
             Request(a,BanishRequest,0xf30,"banish");Request(a,GoldRequest,0x578,"gold");
             Request(a,FreeRerollRequest,0x62c,"free");Request(a,ShieldRequest,0x56c,"shield");
-            a.Emit("41 BA FF FF FF FF 44 87 50 28 41 83 FA FF");a.Branch("0F 84","noXp");
-            a.Emit("44 89 D2 48 89 F1");FrameCode.Call(a,Native.Add(image,0x5f05680));
+            RunCommands.Take(a,XpRequest,"noXp");
+            a.Emit("44 89 D2 48 89 F1"); // mov edx,r10d; mov rcx,rsi (Game, grant)
+            FrameCode.Call(a,Native.Add(image,0x5f05680)); // game XP award: enabled XP scaling also applies to grants
             a.Label("noXp");FrameCode.Pointer(a,Native.Add(start,4096));
             AutoPickCode.Emit(a,start,image);RunStat.Emit(a);
-            a.Emit("83 78 10 00");a.Branch("0F 84","noBan");a.Emit("C7 86 30 0F 00 00 0F 27 00 00");a.Label("noBan");
-            a.Emit("83 78 14 00");a.Branch("0F 84","noReroll");a.Emit("C7 86 2C 06 00 00 0F 27 00 00");a.Label("noReroll");
-            a.Emit("41 BA FF FF FF FF 44 87 50 20 41 83 FA FF");a.Branch("0F 85","heal");
-            a.Emit("83 78 24 00");a.Branch("0F 84","noHeal");a.Emit("83 BE 68 05 00 00 00");a.Branch("0F 8E","noHeal");
-            a.Label("heal");a.Emit("44 8B 96 C8 05 00 00 44 89 96 68 05 00 00");a.Label("noHeal");
-            a.Emit("83 78 2C 00");a.Branch("0F 84","noDamage");a.Emit("F3 0F 10 86 CC 05 00 00 F3 0F 5F 40 2C F3 0F 11 86 CC 05 00 00");a.Label("noDamage");
-            a.Emit("83 78 30 00");a.Branch("0F 84","noPickup");a.Emit("F3 0F 10 86 E0 05 00 00 F3 0F 5F 40 30 F3 0F 11 86 E0 05 00 00");a.Label("noPickup");
-            a.Emit("41 BA FF FF FF FF 44 87 50 34 41 83 FA FF");a.Branch("0F 84","noAdvance");
-            a.Emit("66 41 0F 6E C2 F3 0F 58 86 A0 0E 00 00 F3 0F 11 86 A0 0E 00 00");a.Label("noAdvance");
-            a.Label("runDone");FrameCode.Restore(a);a.Emit("80 B9 5E 0F 00 00 00");a.Bytes.AddRange(RarityCode.TailJump(continuation));return a.Finish();
+            a.Emit("83 78 10 00");a.Branch("0F 84","noBan"); // cmp [data+UnlimitedBanish],0
+            a.Emit("C7 86 30 0F 00 00 0F 27 00 00");a.Label("noBan"); // mov [Game+F30],9999
+            a.Emit("83 78 14 00");a.Branch("0F 84","noReroll");
+            a.Emit("C7 86 2C 06 00 00 0F 27 00 00");a.Label("noReroll"); // mov [Game+62C],9999
+            RunCommands.Take(a,HealRequest,"autoHeal");a.Branch("E9","heal");
+            a.Label("autoHeal");a.Emit("83 78 24 00");a.Branch("0F 84","noHeal"); // cmp [data+AutoHeal],0
+            a.Emit("83 BE 68 05 00 00 00");a.Branch("0F 8E","noHeal"); // cmp HP,0: no automatic revival
+            a.Label("heal");a.Emit("44 8B 96 C8 05 00 00 44 89 96 68 05 00 00");a.Label("noHeal"); // copy max HP bits to current HP
+            RunCommands.Take(a,AdvanceRequest,"noAdvance");
+            a.Emit("66 41 0F 6E C2 F3 0F 58 86 A0 0E 00 00 F3 0F 11 86 A0 0E 00 00 F3 0F 11 40 68"); // movd xmm0,r10d; addss xmm0,clock; store clock and LastClock
+            a.Label("noAdvance");a.Label("runDone");FrameCode.Restore(a);
+            a.Emit("80 B9 5E 0F 00 00 00"); // replay cmp [rcx+F5E],0 for the original solo/co-op branch
+            a.Bytes.AddRange(RarityCode.TailJump(continuation));return a.Finish();
         }
         static void Request(Assembler a,int request,int field,string label)
         {
-            // Exchange with -1 atomically, so a new queued request cannot be erased
-            // by the acknowledgement of the previous one.
-            a.Emit("41 BA FF FF FF FF 44 87 50 "+request.ToString("X2")+" 41 83 FA FF");a.Branch("0F 84",label);
-            a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(field));
+            RunCommands.Take(a,request,label);
+            a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(field)); // mov [rsi+field],r10d
             a.Label(label);
         }
     }
@@ -232,7 +228,7 @@ namespace AzerothTrainer
         internal int AutoSpellMode,AutoItemMode;internal double AutoPickDelay=0.5;
         internal readonly bool[] StatEnabled=new bool[RunStat.All.Length];
         internal readonly double[] StatValues=Array.ConvertAll(RunStat.All,delegate(RunStat s){return s.Default;});
-        internal double SpellChance=50,ItemChance=50,Speed=1,XpMultiplier=1,DamageMinimum=0,PickupMinimum=0;
+        internal double SpellChance=50,ItemChance=50,Speed=1,XpMultiplier=1;
         internal int RerollCost=100;
     }
     internal sealed class PatchSession : IDisposable
@@ -241,9 +237,8 @@ namespace AzerothTrainer
         internal readonly Process Game;
         readonly IntPtr handle;
         readonly List<MemoryPatch> all=new List<MemoryPatch>(),rarity=new List<MemoryPatch>(),prices=new List<MemoryPatch>();
-        readonly MemoryPatch run,xp,profile;
+        readonly MemoryPatch run,xp,profile,health;
         uint talentSequence,marksSequence;
-        internal bool ApplyComplete {get;private set;}
         bool disposed;
         internal bool Enabled {get {foreach(var p in all)if(p.Enabled)return true;return false;}}
         internal bool Exited {get {if(disposed)return true;try{return Game.HasExited;}catch(InvalidOperationException){return true;}}}
@@ -260,6 +255,7 @@ namespace AzerothTrainer
                 run=new MemoryPatch(handle,game.Id,Native.Add(imageBase,RunCode.HookRva),RunCode.Original,RunCode.Original.Length,delegate(IntPtr c){return RunCode.Build(c,continuation,imageBase);},RunCode.HookRva);all.Add(run);
                 xp=AddGenerated(imageBase,XpCode.HookRva,XpCode.Original,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,XpCode.HookRva+XpCode.Original.Length));});
                 profile=AddGenerated(imageBase,ProfileCode.HookRva,ProfileCode.Original,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,ProfileCode.HookRva+ProfileCode.Original.Length),imageBase);});
+                health=AddGenerated(imageBase,HealthCode.HookRva,HealthCode.Original,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,HealthCode.HookRva+HealthCode.Original.Length));});
                 int[] branches={0x5eca83f,0x5ef6bbd,0x5f6e9e9,0x5f6fc3c,0x5f7a4b3};
                 int[] costs={0x5eca8bd,0x5ef6c3b,0x5f6ea67,0x5f6fcba,0x5f7a535};
                 for(int i=0;i<5;i++)
@@ -296,12 +292,15 @@ namespace AzerothTrainer
         }
         internal void Apply(TrainerOptions options)
         {
-            ValidateOptions(options);ApplyComplete=false;
+            ValidateOptions(options);
             if(Exited)throw new Exception("The game has exited.");
+            health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
+            health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
             run.Install(null,delegate(MemoryPatch p)
             {
                 p.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
-                foreach(int offset in new int[]{8,12,24,28,32,40,52})p.Data(offset,BitConverter.GetBytes(-1));
+                foreach(int offset in RunCommands.Offsets)p.Data(offset,BitConverter.GetBytes(-1L));
+                p.Data(RunCommands.Owner,new byte[24]);
                 p.Data(AutoPickCode.SpellMode,new byte[40]);p.Data(AutoPickCode.Random,BitConverter.GetBytes(unchecked((uint)Environment.TickCount)|1));p.Data(AutoPickCode.MaxDelta,BitConverter.GetBytes(0.1f));
                 p.Data(RunStat.DataOffset,new byte[RunStat.All.Length*RunStat.Stride]);
             });
@@ -312,8 +311,6 @@ namespace AzerothTrainer
             for(int i=0;i<RunStat.All.Length;i++)run.Data(RunStat.DataOffset+i*RunStat.Stride,BitConverter.GetBytes((ulong)RunStat.All[i].Bits(options.StatValues[i])|(options.StatEnabled[i]?1UL<<32:0)));
             profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));});
             run.Data(RunCode.AutoHeal,BitConverter.GetBytes(options.AutoHeal?1:0));
-            run.Data(RunCode.DamageMinimum,BitConverter.GetBytes((float)options.DamageMinimum));
-            run.Data(RunCode.PickupMinimum,BitConverter.GetBytes((float)options.PickupMinimum));
             run.Data(RunCode.UnlimitedBanish,BitConverter.GetBytes(options.UnlimitedBanish?1:0));
             run.Data(RunCode.UnlimitedReroll,BitConverter.GetBytes(options.UnlimitedReroll?1:0));
             for(int index=0;index<rarity.Count;index++)
@@ -358,22 +355,37 @@ namespace AzerothTrainer
                     }
                 }
             }
-            ApplyComplete=true;
         }
         internal static void ValidateOptions(TrainerOptions o)
         {
             foreach(double p in new double[]{o.SpellChance,o.ItemChance})if(Double.IsNaN(p)||Double.IsInfinity(p)||p<0||p>100)throw new ArgumentOutOfRangeException("chance");
             if(o.AutoSpellMode<0||o.AutoSpellMode>5||o.AutoItemMode<0||o.AutoItemMode>5||Double.IsNaN(o.AutoPickDelay)||Double.IsInfinity(o.AutoPickDelay)||o.AutoPickDelay<0||o.AutoPickDelay>10)throw new ArgumentOutOfRangeException("auto-pick");
             for(int i=0;i<RunStat.All.Length;i++)RunStat.All[i].Bits(o.StatValues[i]);
-            foreach(double v in new double[]{o.Speed,o.XpMultiplier,o.DamageMinimum,o.PickupMinimum})if(Double.IsNaN(v)||Double.IsInfinity(v)||v<0)throw new ArgumentOutOfRangeException("multiplier");
-            if(o.Speed>10||o.XpMultiplier<0.1||o.XpMultiplier>100||o.DamageMinimum>1000||o.PickupMinimum>1000||o.RerollCost<0||o.RerollCost>100000)throw new ArgumentOutOfRangeException("options");
+            foreach(double v in new double[]{o.Speed,o.XpMultiplier})if(Double.IsNaN(v)||Double.IsInfinity(v)||v<0)throw new ArgumentOutOfRangeException("multiplier");
+            if(o.Speed>10||o.XpMultiplier<0.1||o.XpMultiplier>100||o.RerollCost<0||o.RerollCost>100000)throw new ArgumentOutOfRangeException("options");
         }
         internal void SetFreeRerolls(int n){Queue(RunCode.FreeRerollRequest,n,9999);}
         internal void Heal(){Queue(RunCode.HealRequest,1,1);}
         internal void GrantXp(int n){Queue(RunCode.XpRequest,n,1000000);}
         internal void SetShield(float n){if(Single.IsNaN(n)||Single.IsInfinity(n)||n<0||n>1000000)throw new ArgumentOutOfRangeException("shield");QueueBits(RunCode.ShieldRequest,BitConverter.GetBytes(n));}
         internal void Advance(float seconds){if(Single.IsNaN(seconds)||Single.IsInfinity(seconds)||seconds<0||seconds>3600)throw new ArgumentOutOfRangeException("seconds");QueueBits(RunCode.AdvanceRequest,BitConverter.GetBytes(seconds));}
-        void QueueBits(int offset,byte[] bytes){if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");run.Data(offset,bytes);}
+        void QueueBits(int offset,byte[] bytes)
+        {
+            if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
+            ulong state=BitConverter.ToUInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),8),0);
+            IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0));
+            if(owner==IntPtr.Zero)throw new Exception("Enter a live run before sending a run action.");
+            byte phase=Native.Read(handle,Native.Add(owner,0xf63),1)[0];
+            float hp=BitConverter.ToSingle(Native.Read(handle,Native.Add(owner,0x568),4),0);
+            if((phase!=1&&phase!=2)||!(hp>0))throw new Exception("Enter a live run before sending a run action.");
+            run.Data(offset,BitConverter.GetBytes(RunCommands.Pack(state,BitConverter.ToUInt32(bytes,0))));
+        }
+        internal void CancelRunRequests()
+        {
+            if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
+            using(var frozen=new FrozenThreads(Game.Id))
+                foreach(int offset in RunCommands.Offsets)run.Data(offset,BitConverter.GetBytes(-1L));
+        }
         internal uint SetTalentPoints(int classId,int n){if(n<0||n>51)throw new ArgumentOutOfRangeException("points");return QueueProfile(ProfileCode.TalentRequest,classId,n);}
         internal uint SetMarks(int classId,int rawTenths){if(rawTenths<0||rawTenths>10000000)throw new ArgumentOutOfRangeException("marks");return QueueProfile(ProfileCode.MarksRequest,classId,rawTenths);}
         uint QueueProfile(int offset,int classId,int value)
@@ -398,7 +410,7 @@ namespace AzerothTrainer
         {
             if(value<0||value>maximum)throw new ArgumentOutOfRangeException("value");
             if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
-            run.Data(offset,BitConverter.GetBytes(value));
+            QueueBits(offset,BitConverter.GetBytes(value));
         }
         internal void Disable()
         {

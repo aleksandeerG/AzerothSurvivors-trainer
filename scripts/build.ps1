@@ -26,6 +26,8 @@ $sourceFiles = @(
     'src\Hooks\HookEngine.cs'
     'src\Hooks\AdditionalCode.cs'
     'src\Hooks\RunEnhancements.cs'
+    'src\Hooks\HealthCode.cs'
+    'src\Hooks\RunCommands.cs'
     'src\Interop\Native.cs'
     'src\Interop\UnwindSupport.cs'
     'src\Diagnostics\TrainerDiagnostics.cs'

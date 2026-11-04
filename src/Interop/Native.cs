@@ -1,13 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Diagnostics;
-using System.Drawing;
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Windows.Forms;
-using System.Threading;
 
 namespace AzerothTrainer
 {
@@ -64,37 +58,53 @@ namespace AzerothTrainer
     {
         readonly List<IntPtr> threads=new List<IntPtr>();
         internal readonly List<long> InstructionPointers=new List<long>();
-        internal static int SuspensionCount;
         internal FrozenThreads(int pid)
         {
-            Interlocked.Increment(ref SuspensionCount);
-            IntPtr snapshot=Native.CreateToolhelp32Snapshot(4,0);
-            if(snapshot==new IntPtr(-1)) throw Native.Error("Cannot list game threads");
+            var seen=new HashSet<uint>();
             IntPtr buffer=Marshal.AllocHGlobal(1264);
             IntPtr context=new IntPtr((buffer.ToInt64()+15)&~15L);
             try
             {
-                Native.ThreadEntry e=new Native.ThreadEntry(); e.size=(uint)Marshal.SizeOf(e);
-                if(!Native.Thread32First(snapshot,ref e)) throw Native.Error("Cannot read game threads");
-                do
+                // A newly created thread may miss the first snapshot. Keep all
+                // captured threads suspended until a full pass finds no new IDs.
+                for(int pass=0;pass<16;pass++)
                 {
-                    if(e.pid!=(uint)pid) continue;
-                    IntPtr t=Native.OpenThread(0x4A,false,e.tid);
-                    if(t==IntPtr.Zero)
+                    bool added=false;IntPtr snapshot=Native.CreateToolhelp32Snapshot(4,0);
+                    if(snapshot==new IntPtr(-1))throw Native.Error("Cannot list game threads");
+                    try
                     {
-                        if(Marshal.GetLastWin32Error()==87) continue; // Thread already exited.
-                        throw Native.Error("Cannot open a game thread");
+                        Native.ThreadEntry e=new Native.ThreadEntry();e.size=(uint)Marshal.SizeOf(e);
+                        if(!Native.Thread32First(snapshot,ref e))throw Native.Error("Cannot read game threads");
+                        do
+                        {
+                            if(e.pid!=(uint)pid||seen.Contains(e.tid))continue;
+                            IntPtr t=Native.OpenThread(0x4A,false,e.tid);
+                            if(t==IntPtr.Zero)
+                            {
+                                if(Marshal.GetLastWin32Error()==87)continue; // Thread already exited.
+                                throw Native.Error("Cannot open a game thread");
+                            }
+                            if(Native.SuspendThread(t)==UInt32.MaxValue)
+                            {
+                                int error=Marshal.GetLastWin32Error();Native.CloseHandle(t);
+                                if(error==6||error==87)continue;
+                                throw new Win32Exception(error,"Cannot pause game thread");
+                            }
+                            threads.Add(t);seen.Add(e.tid);added=true;
+                            Marshal.WriteInt32(context,48,0x100001); // AMD64 CONTEXT_CONTROL
+                            if(!Native.GetThreadContext(t,context))throw Native.Error("Cannot inspect paused game thread");
+                            InstructionPointers.Add(Marshal.ReadInt64(context,248));
+                        }while(Native.Thread32Next(snapshot,ref e));
+                        if(Marshal.GetLastWin32Error()!=18)throw Native.Error("Cannot finish reading game threads");
                     }
-                    if(Native.SuspendThread(t)==UInt32.MaxValue){ Native.CloseHandle(t); throw Native.Error("Cannot pause game thread"); }
-                    threads.Add(t);
-                    Marshal.WriteInt32(context,48,0x100001); // AMD64 CONTEXT_CONTROL
-                    if(!Native.GetThreadContext(t,context)) throw Native.Error("Cannot inspect paused game thread");
-                    InstructionPointers.Add(Marshal.ReadInt64(context,248));
-                } while(Native.Thread32Next(snapshot,ref e));
-                if(threads.Count==0) throw new Exception("The game has exited.");
+                    finally{Native.CloseHandle(snapshot);}
+                    if(threads.Count==0)throw new Exception("The game has exited.");
+                    if(!added)return;
+                }
+                throw new Exception("Game threads did not settle. Retry in a moment.");
             }
             catch { Dispose(); throw; }
-            finally { Marshal.FreeHGlobal(buffer); Native.CloseHandle(snapshot); }
+            finally { Marshal.FreeHGlobal(buffer); }
         }
         internal void RequireOutside(IntPtr address, int count)
         {

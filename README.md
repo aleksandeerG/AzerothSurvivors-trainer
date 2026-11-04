@@ -96,7 +96,9 @@ Set separate legendary chances for spell and item cards (0-100%). Changes affect
 
 ## Run and time
 
-Set simulation speed (0-10x), XP gain (0.1-100x), or auto-heal. Set gold, banishes, rerolls, and shield; grant XP, heal now, or advance the clock up to 3,600 seconds. Requests wait for an active run. High speeds can skip collisions; healing does not revive. Disable does not undo grants or clock changes.
+Set speed (0-10x), XP gain (0.1-100x), healing, resources, or a clock advance (up to 3,600 seconds). XP grants use the enabled XP multiplier. High speeds can skip collisions; stat recalculation can reduce shield.
+
+Run actions require a live run. **Cancel queued actions** discards pending requests. Changes in the observed run owner, active state, or clock invalidate old requests. Disable does not undo completed actions.
 
 ## Auto-pick
 
@@ -104,19 +106,21 @@ Choose spell and item offers independently: left, middle, right, random, or high
 
 ## Run stats
 
-Enable any of 20 stat minimums, enter values, and click **Apply options**. Stronger bonuses stay. Health sets max HP; **Heal now** refills it. Armor caps at 60%; DoT stacks at 4. Disable stops enforcement, but existing values may remain until recalculated.
+Enable any of 20 stat minimums and click **Apply options**. Stronger bonuses stay. Max HP also applies during stat recalculation, preserving extra HP through level-ups and offers without Auto-heal. **Heal now** refills HP. Armor caps at 60%; DoT stacks at 4. Existing values may remain after Disable.
 
 ## Talents and marks
 
-Select a class, then set earned talent points (0-51) or marks. These changes are permanent, with profile backups in `trainer/backups`. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory to refresh. Normal unlock requirements still apply.
+Select a class, then set earned points (0-51) or marks. Changes are permanent, with backups in `trainer/backups`. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory. Disable and Close warn about pending edits, which may be cancelled. Normal unlock requirements apply.
 
 ## Compatibility and lifecycle
 
-The standalone x64 executable uses Windows .NET Framework and needs no Python, Cheat Engine or downloaded packages. It validates the executable SHA-256, all 16 patch sites and the unchanged HUD and co-op guards (18 compatibility sites) for the installed desktop build (embedded date 2026-11-02). A game update needs verified offsets.
+The standalone x64 executable uses Windows .NET Framework and needs no Python, Cheat Engine or downloaded packages. It validates the executable SHA-256, all 17 patch sites and the unchanged HUD and co-op guards (19 compatibility sites) for the installed desktop build (embedded date 2026-11-02). A game update needs verified offsets.
 
 Run the trainer and game as the same Windows user with matching administrator privileges. Joining co-op clients cannot control the host's simulation. If the trainer is forcibly terminated while enabled, restart the game to remove its hooks.
 
 Compatibility checking and initial option application run off the UI thread. Data-only updates, including chances, speed and XP scaling, do not pause game threads. Installing/removing hooks and changing price calculations briefly pause threads; a busy-region refusal can be retried. If an enable is only partly successful, the status explicitly offers **Apply options** to finish or **Disable** to restore code.
+
+Thread snapshots repeat until a pass finds no new threads. A 16-pass limit releases captured threads and refuses the operation if they do not settle. An external process can still create a thread after the final snapshot.
 
 Generated hooks have registered Windows unwind information. They reuse the original frame and avoid extra pushes. Entry and continuation jumps are tested to avoid false Windows epilogue detection. Registered code pages are retained until the game exits so stack walks cannot refer to freed metadata; Disable/Enable within the same window reuses those small allocations. The game's executable and MPQs stay unchanged on disk. Permanent progression buttons intentionally invoke the game's own save routine.
 
@@ -129,7 +133,7 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-files` works with the game closed. It verifies the on-disk executable hash, 18 instruction sites, and six original unwind frames. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
+`--verify-files` works with the game closed. It verifies the on-disk executable hash, 19 instruction sites, and seven original unwind frames. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
 
 To inspect an already running game, close other trainers normally and run:
 
@@ -179,6 +183,8 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | `src/Hooks/HookEngine.cs` | Supported build data, instruction assembly, patch lifecycle, session management, resources, and profile backups |
 | `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |
 | `src/Hooks/RunEnhancements.cs` | Stat minimums and automatic offer selection |
+| `src/Hooks/HealthCode.cs` | Max-HP floor during recalculation, before the game's HP clamp |
+| `src/Hooks/RunCommands.cs` | Run epochs and atomic request consumption to reject stale actions |
 | `src/Interop/Native.cs` | Windows process/memory APIs and thread suspension |
 | `src/Interop/UnwindSupport.cs` | Windows x64 unwind metadata registration for generated hooks |
 | `src/Diagnostics/TrainerDiagnostics.cs` | On-disk and live compatibility reporting |

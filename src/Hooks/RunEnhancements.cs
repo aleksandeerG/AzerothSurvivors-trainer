@@ -44,18 +44,18 @@ namespace AzerothTrainer
             {
                 var stat=All[i];int at=DataOffset+i*Stride;string done="stat"+i;
                 // Each value and enabled flag is published as one aligned word.
-                a.Emit("83 B8");a.Bytes.AddRange(BitConverter.GetBytes(at+4));a.Emit("00");a.Branch("0F 84",done);
+                a.Emit("83 B8");a.Bytes.AddRange(BitConverter.GetBytes(at+4));a.Emit("00");a.Branch("0F 84",done); // cmp dword [rax+enabled],0
                 if(stat.Kind>=4)
                 {
-                    a.Emit("44 8B 90");a.Bytes.AddRange(BitConverter.GetBytes(at));
-                    a.Emit("44 3B 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));a.Branch("0F 86",done);
-                    a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));
+                    a.Emit("44 8B 90");a.Bytes.AddRange(BitConverter.GetBytes(at)); // mov r10d,[rax+minimum]
+                    a.Emit("44 3B 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));a.Branch("0F 86",done); // cmp r10d,[rsi+stat]; jbe done
+                    a.Emit("44 89 96");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // mov [rsi+stat],r10d
                 }
                 else
                 {
-                    a.Emit("F3 0F 10 80");a.Bytes.AddRange(BitConverter.GetBytes(at));
-                    a.Emit(stat.Kind==3?"F3 0F 5D 86":"F3 0F 5F 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));
-                    a.Emit("F3 0F 11 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field));
+                    a.Emit("F3 0F 10 80");a.Bytes.AddRange(BitConverter.GetBytes(at)); // movss xmm0,[rax+minimum]
+                    a.Emit(stat.Kind==3?"F3 0F 5D 86":"F3 0F 5F 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // minss cooldown factor / maxss ordinary stat
+                    a.Emit("F3 0F 11 86");a.Bytes.AddRange(BitConverter.GetBytes(stat.Field)); // movss [rsi+stat],xmm0
                 }
                 a.Label(done);
             }
@@ -73,19 +73,19 @@ namespace AzerothTrainer
             a.Emit("0F B6 96 61 0F 00 00 83 FA 02");a.Branch("0F 87","autoReset");
             a.Emit("44 8B 40 38 85 D2");a.Branch("0F 84","autoMode");a.Emit("44 8B 40 3C");
             a.Label("autoMode");a.Emit("45 85 C0");a.Branch("0F 84","autoReset");
-            a.Emit("4C 8B 9E 40 07 00 00 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset");
-            a.Emit("4C 8B 8E 38 07 00 00 4D 85 C9");a.Branch("0F 84","autoReset");
+            a.Emit("4C 8B 9E 40 07 00 00 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset"); // mov r11,offer count; require 1..3
+            a.Emit("4C 8B 8E 38 07 00 00 4D 85 C9");a.Branch("0F 84","autoReset"); // mov r9,offer vector; test r9,r9
             a.Emit("48 39 70 40");a.Branch("0F 85","autoOffer");
             a.Emit("8B 96 CC 0E 00 00 3B 50 48");a.Branch("0F 84","autoWait");
             a.Label("autoOffer");a.Emit("48 89 70 40 8B 96 CC 0E 00 00 89 50 48 C7 40 4C 00 00 00 00");
-            a.Label("autoWait");a.Emit("F3 0F 10 44 24 78 0F 57 D2 F3 0F 5F C2 F3 0F 5D 40 5C F3 0F 58 40 4C F3 0F 11 40 4C 0F 2E 40 50");a.Branch("0F 82","autoDone");
+            a.Label("autoWait");a.Emit("F3 0F 10 44 24 78 0F 57 D2 F3 0F 5F C2 F3 0F 5D 40 5C F3 0F 58 40 4C F3 0F 11 40 4C 0F 2E 40 50");a.Branch("0F 82","autoDone"); // clamp real dt, accumulate elapsed, ucomiss against delay
             a.Emit("C7 40 4C 00 00 00 00 41 83 F8 05");a.Branch("0F 84","autoHighest");a.Emit("41 83 F8 04");a.Branch("0F 84","autoRandom");
-            a.Emit("41 8D 50 FF 41 8D 4B FF 39 CA 0F 47 D1");a.Branch("E9","autoChoose");
-            a.Label("autoRandom");a.Emit("44 69 50 54 0D 66 19 00 41 81 C2 5F F3 6E 3C 44 89 50 54 44 89 D0 31 D2 41 F7 F3");a.Branch("E9","autoChoose");
+            a.Emit("41 8D 50 FF 41 8D 4B FF 39 CA 0F 47 D1");a.Branch("E9","autoChoose"); // EDX=min(mode-1,count-1), using lea/cmp/cmova
+            a.Label("autoRandom");a.Emit("44 69 50 54 0D 66 19 00 41 81 C2 5F F3 6E 3C 44 89 50 54 44 89 D0 31 D2 41 F7 F3");a.Branch("E9","autoChoose"); // LCG state = state*1664525+1013904223; EDX=remainder after div count
             a.Label("autoHighest");a.Emit("31 C9 31 D2 45 8B 91 98 00 00 00");
             a.Label("autoScan");a.Emit("41 8B 81 98 00 00 00 44 39 D0");a.Branch("0F 86","autoNext");a.Emit("41 89 C2 89 CA");
             a.Label("autoNext");a.Emit("49 81 C1 A0 00 00 00 FF C1 44 39 D9");a.Branch("0F 82","autoScan");
-            a.Label("autoChoose");a.Emit("48 89 F1");FrameCode.Call(a,Native.Add(image,ChooseRva));
+            a.Label("autoChoose");a.Emit("48 89 F1");FrameCode.Call(a,Native.Add(image,ChooseRva)); // RCX=Game, EDX=card index; call normal choice handler
             FrameCode.Pointer(a,Native.Add(start,4096));a.Emit("FF 40 58");a.Branch("E9","autoDone");
             a.Label("autoReset");a.Emit("C7 40 4C 00 00 00 00 48 C7 40 40 00 00 00 00");
             a.Label("autoDone");FrameCode.Pointer(a,Native.Add(start,4096));

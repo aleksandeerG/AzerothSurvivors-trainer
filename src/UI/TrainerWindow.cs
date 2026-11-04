@@ -13,7 +13,7 @@ namespace AzerothTrainer
         readonly CheckBox spellOn=new CheckBox(),itemOn=new CheckBox(),fixedCost=new CheckBox(),unlimitedBan=new CheckBox(),unlimitedReroll=new CheckBox(),autoHeal=new CheckBox(),speedOn=new CheckBox(),xpOn=new CheckBox(),autoSpell=new CheckBox(),autoItem=new CheckBox();
         readonly ComboBox resourceKind=new ComboBox(),classKind=new ComboBox(),spellRule=new ComboBox(),itemRule=new ComboBox();
         readonly DataGridView stats=new DataGridView();
-        readonly Label status=new Label();readonly Timer timer=new Timer();
+        readonly Label status=new Label(),resourceHelp=new Label();readonly Timer timer=new Timer();
         readonly Button enable=new Button(),apply=new Button(),disable=new Button();
         readonly List<Control> connectedControls=new List<Control>();
         readonly int[] classIds={1,2,3,4,5,7,8,9,11};
@@ -34,7 +34,8 @@ namespace AzerothTrainer
             Check(run.Controls,speedOn,"Simulation speed",18,15,220,false);Number(run.Controls,speed,235,15,115,0,10,1,1,0.1m);Label(run.Controls,"x  (0 freezes time; 1 is normal)",365,19,320,28,null);
             Check(run.Controls,xpOn,"Run XP multiplier",18,60,220,false);Number(run.Controls,xp,235,60,115,0.1m,100,1,1,0.1m);
             Check(run.Controls,autoHeal,"Auto-heal while alive",388,60,300,false);
-            Label(run.Controls,"Changes apply during a run. Stat minimums are in Run stats.",18,115,660,50,null);
+            resourceHelp.SetBounds(18,115,660,36);run.Controls.Add(resourceHelp);
+            Button(run.Controls,"Cancel queued actions",18,156,260,delegate{session.CancelRunRequests();status.Text="Queued run actions cancelled. Completed actions are kept.";},true);
             Label(run.Controls,"Run resource",18,202,180,24,null);resourceKind.SetBounds(18,231,220,30);ComboStyle(resourceKind);
             resourceKind.Items.AddRange(new object[]{"Gold (set)","Banishes (set)","Free rerolls (set)","Shield (set)","Run XP (grant)"});run.Controls.Add(resourceKind);
             Number(run.Controls,resource,252,231,135,0,100000,1000,0,1);resourceKind.SelectedIndexChanged+=delegate{ResourceLimits();};resourceKind.SelectedIndex=0;
@@ -44,9 +45,9 @@ namespace AzerothTrainer
             Label(profile.Controls,"Class to edit",18,21,210,27,null);classKind.SetBounds(235,19,280,30);ComboStyle(classKind);
             classKind.Items.AddRange(new object[]{"Warrior","Paladin","Hunter","Rogue","Priest","Shaman","Mage","Warlock","Druid"});classKind.SelectedIndex=0;profile.Controls.Add(classKind);
             Label(profile.Controls,"Earned talent points",18,83,250,27,null);Number(profile.Controls,talents,281,80,125,0,51,51,0,1);
-            Button(profile.Controls,"Set talent points",430,77,250,delegate{talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);Queued("Class talent points");},true);
+            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);ProfileQueued("Class talent points");},true);
             Label(profile.Controls,"Class marks",18,143,250,27,null);Number(profile.Controls,marks,281,140,125,0,1000000,1000,1,0.1m);
-            Button(profile.Controls,"Set marks",430,137,250,delegate{marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));Queued("Class marks");},true);
+            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));ProfileQueued("Class marks");},true);
             Label(profile.Controls,"Permanent changes; backups are saved in trainer\\backups.\nRespec before lowering points. Reopen the Armory to refresh.\nMarks still require normal unlocks.",18,206,660,156,new Font("Segoe UI",9));
             Check(automation.Controls,autoSpell,"Auto-pick spell offers",18,21,290,false);
             spellRule.SetBounds(333,21,345,30);ComboStyle(spellRule);spellRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(spellRule);spellRule.SelectedIndex=4;
@@ -59,7 +60,7 @@ namespace AzerothTrainer
             Button(Controls,"Launch game",20,497,160,LaunchGame,false);
             Configure(enable,"Enable trainer",194,497,170);enable.Click+=async delegate{await ApplyAsync();};Controls.Add(enable);
             Configure(apply,"Apply options",378,497,170);apply.Click+=async delegate{await ApplyAsync();};Controls.Add(apply);
-            Configure(disable,"Disable",562,497,178);disable.Click+=delegate{try{session.Disable();talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();status.Text="Disabled. Original game code restored.";}catch(Exception ex){ShowError(ex);}};Controls.Add(disable);
+            Configure(disable,"Disable",562,497,178);disable.Click+=delegate{try{if(!ConfirmPendingProfile("Disable")||session==null)return;bool pending=talentPending!=0||marksPending!=0;session.Disable();talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();status.Text=pending?"Disabled. Check the Armory: a pending class edit may have completed before disabling.":"Disabled. Original game code restored.";}catch(Exception ex){ShowError(ex);}};Controls.Add(disable);
             status.SetBounds(23,555,714,74);status.Text="Disabled. Start the game, select options, then enable.";Controls.Add(status);
             Label(Controls,"Created by aleksanderG",23,649,205,25,new Font("Segoe UI",9));
             CreditLink("aleksanderg.com","https://aleksanderg.com/",235,649,190);
@@ -68,7 +69,7 @@ namespace AzerothTrainer
             FormClosing+=delegate(object sender,FormClosingEventArgs e)
             {
                 if(busy){e.Cancel=true;status.Text="Finishing the trainer update. Close again when it completes.";return;}
-                try{Detach();timer.Stop();timer.Dispose();}catch(Exception ex){e.Cancel=true;ShowError(ex);}
+                try{if(!ConfirmPendingProfile("Close")){e.Cancel=true;return;}Detach();timer.Stop();timer.Dispose();}catch(Exception ex){e.Cancel=true;ShowError(ex);}
             };
         }
         static TabPage Tab(TabControl tabs,string title){var p=new TabPage(title){BackColor=Color.FromArgb(30,34,43),ForeColor=Color.WhiteSmoke};tabs.TabPages.Add(p);return p;}
@@ -79,7 +80,6 @@ namespace AzerothTrainer
             var parts=new List<string>();if(o.SpellLegendary)parts.Add("Spells "+o.SpellChance.ToString("0.0")+"%");if(o.ItemLegendary)parts.Add("Items "+o.ItemChance.ToString("0.0")+"%");
             if(o.FixedCost)parts.Add("Reroll "+o.RerollCost+" gold");if(o.UnlimitedBanish)parts.Add("Unlimited banishes");if(o.UnlimitedReroll)parts.Add("Unlimited rerolls");
             if(o.SpeedEnabled)parts.Add("Speed "+o.Speed.ToString("0.0")+"x");if(o.XpEnabled)parts.Add("XP "+o.XpMultiplier.ToString("0.0")+"x");if(o.AutoHeal)parts.Add("Auto-heal");
-            if(o.DamageMinimum>0)parts.Add("Damage floor "+o.DamageMinimum.ToString("0.0")+"x");if(o.PickupMinimum>0)parts.Add("Pickup floor "+o.PickupMinimum.ToString("0.0"));
             if(o.AutoSpellMode>0)parts.Add("Auto-pick spells");if(o.AutoItemMode>0)parts.Add("Auto-pick items");int count=0;foreach(bool active in o.StatEnabled)if(active)count++;if(count>0)parts.Add(count+" stat minimums");
             return parts.Count==0?"Connected. All options are off.":"Enabled | "+String.Join(" | ",parts.ToArray());
         }
@@ -133,12 +133,22 @@ namespace AzerothTrainer
             }
             if(marksPending!=0&&session.MarksResult(marksPending)==1){marksPending=0;status.Text="Class marks updated. Reopen the Armory to refresh.";}
         }
-        void ResourceLimits(){resource.DecimalPlaces=resourceKind.SelectedIndex==3?1:0;resource.Maximum=resourceKind.SelectedIndex==0?100000:(resourceKind.SelectedIndex==1||resourceKind.SelectedIndex==2?9999:1000000);}
+        void ResourceLimits()
+        {
+            resource.DecimalPlaces=resourceKind.SelectedIndex==3?1:0;resource.Maximum=resourceKind.SelectedIndex==0?100000:(resourceKind.SelectedIndex==1||resourceKind.SelectedIndex==2?9999:1000000);
+            resourceHelp.Text=resourceKind.SelectedIndex==4?"XP grants also use the enabled Run XP multiplier.":(resourceKind.SelectedIndex==3?"Shield can be reduced by the game's stat recalculation.":"Run actions need a live run. Stat minimums are in Run stats.");
+        }
         void SetResource()
         {
             switch(resourceKind.SelectedIndex){case 0:session.SetGold((int)resource.Value);break;case 1:session.SetBanishes((int)resource.Value);break;case 2:session.SetFreeRerolls((int)resource.Value);break;case 3:session.SetShield((float)resource.Value);break;case 4:session.GrantXp((int)resource.Value);break;}Queued(resourceKind.Text);
         }
-        void Queued(string what){status.Text=what+" queued for the next run update.";}
+        void Queued(string what){status.Text=what+" queued for this run. Use Cancel queued actions to discard it.";}
+        void ProfileQueued(string what){status.Text=what+" queued. Waiting for the game's profile update.";}
+        bool ConfirmPendingProfile(string action)
+        {
+            Poll();if(talentPending==0&&marksPending==0)return true;
+            return MessageBox.Show(this,"A talent or marks edit is still pending. It may be cancelled before it is saved. "+action+" anyway?","Pending class edit",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)==DialogResult.Yes;
+        }
         void LaunchGame()
         {
             using(Process running=GameLocator.FindRunning())
