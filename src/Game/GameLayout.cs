@@ -1,214 +1,130 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Iced.Intel;
 namespace AzerothTrainer
 {
-    internal sealed class FunctionSpec
-    {
-        internal readonly string Name,Hash,Frame;
-        internal readonly int Size;
-        internal readonly int[] Masks;
-        internal readonly FieldOperand[] Operands;
-        internal readonly FunctionSpec Previous;
-        internal FunctionSpec(string name,int size,string hash,string masks,string frame,FunctionSpec previous=null,string operands="")
-        {Name=name;Size=size;Hash=hash;Frame=frame;Masks=String.IsNullOrEmpty(masks)?new int[0]:Array.ConvertAll(masks.Split(','),Int32.Parse);Previous=previous;Operands=String.IsNullOrEmpty(operands)?new FieldOperand[0]:Array.ConvertAll(operands.Split(','),s=>new FieldOperand(s));}
-        internal bool Matches(GameImage image,ImageFunction function,MemoryContracts memory)
-        {
-            if(function.Length!=Size)return false;
-            byte[] body=image.Read(function.Start,Size),normalized=(byte[])body.Clone();
-            foreach(int at in Masks){if(at<0||at+4>body.Length)throw new Exception("Invalid signature mask.");Array.Clear(normalized,at,4);}
-            var discovered=new Dictionary<string,int>();
-            foreach(var operand in Operands)
-            {
-                if(operand.Position<0||operand.Position+4>body.Length)throw new Exception("Invalid memory operand position.");
-                int displacement=BitConverter.ToInt32(body,operand.Position),previous;
-                if(!memory.Valid(operand,displacement))return false;
-                int start=checked(displacement-operand.Relative);
-                if(discovered.TryGetValue(operand.Group,out previous)&&previous!=start)return false;
-                discovered[operand.Group]=start;Array.Clear(normalized,operand.Position,4);
-            }
-            if(GameImage.Digest(normalized)!=Hash)return false;
-            foreach(int at in Masks)
-            {
-                if(at<0||at+4>body.Length)throw new Exception("Invalid signature mask.");
-                int target=checked(function.Start+at+4+BitConverter.ToInt32(body,at));
-                bool branch=at>0&&(body[at-1]==0xe8||body[at-1]==0xe9||(at>1&&body[at-2]==0x0f&&(body[at-1]&0xf0)==0x80));
-                if(branch&&!image.Executable(target,1))return false;
-                if(!branch&&!image.Mapped(target))return false; // Includes zero-initialized virtual data.
-            }
-            return GameImage.Digest(UnwindSupport.FrameFor(function.Start,image.Path))==Frame;
-        }
-    }
-    internal sealed class SiteSpec
-    {
-        internal readonly string Name,Function;
-        internal readonly int Offset,Size,Continuation,Guard;
-        internal SiteSpec(string name,string function,int offset,int size,int continuation=0,int guard=0)
-        {Name=name;Function=function;Offset=offset;Size=size;Continuation=continuation==0?offset+size:continuation;Guard=guard==0?size:guard;}
-    }
-    internal sealed class HookSite
-    {
-        internal readonly int Rva,Continuation,Guard;
-        internal readonly byte[] Original;
-        internal HookSite(GameImage image,ImageFunction function,SiteSpec spec)
-        {
-            Rva=checked(function.Start+spec.Offset);Continuation=checked(function.Start+spec.Continuation);Guard=spec.Guard;
-            if(spec.Offset<0||spec.Size<=0||spec.Offset+spec.Size>function.Length||spec.Offset+spec.Guard>function.Length||spec.Continuation<0||spec.Continuation>function.Length)throw new Exception("Invalid hook context.");
-            Original=image.Read(Rva,spec.Size);
-        }
-    }
-    internal sealed class LayoutSpec
-    {
-        internal readonly string Name;
-        internal readonly bool Updated;
-        internal readonly FunctionSpec[] Functions;
-        internal readonly SiteSpec[] Sites;
-        internal LayoutSpec(string name,bool updated,FunctionSpec[] functions,SiteSpec[] sites){Name=name;Updated=updated;Functions=functions;Sites=sites;}
-    }
-    internal enum TrainerFeature { SpellChance,ItemChance,RerollCost,RunControls,ClassProgression }
+    internal enum TrainerFeature {SpellChance,ItemChance,RerollCost,RunControls,XpScaling,RunResources,Banishes,Stats,HealthFloor,AutoPick,XpGrant,ClassProgression,Lives,CoopAutoPick,ClassMarks,Gold,FreeRerolls,Shield}
     internal sealed class GameLayout
     {
-        sealed class MatchedFunction
-        {
-            internal ImageFunction Range;internal byte[] Body;internal int[] Relocations;
-            internal FunctionSpec Signature;internal LayoutSpec Source;
-            internal readonly HashSet<string> Origins=new HashSet<string>();
-        }
-        readonly Dictionary<string,MatchedFunction> functions=new Dictionary<string,MatchedFunction>();
-        readonly Dictionary<string,HookSite> sites=new Dictionary<string,HookSite>();
-        readonly Dictionary<string,string> failures=new Dictionary<string,string>();
+        readonly RuntimeDiscovery discovery;
+        readonly Dictionary<string,string> invalid=new Dictionary<string,string>();
         readonly Dictionary<TrainerFeature,string> unavailable=new Dictionary<TrainerFeature,string>();
-        static readonly Dictionary<TrainerFeature,string[]> requirements=new Dictionary<TrainerFeature,string[]>{
-            {TrainerFeature.SpellChance,new[]{"Spell"}},
-            {TrainerFeature.ItemChance,new[]{"Jewelry"}},
-            {TrainerFeature.RerollCost,new[]{"Price0","Hud","Price2","Price3","Price4"}},
-            {TrainerFeature.RunControls,new[]{"Run","Coop","Xp","Health","Choose"}},
-            {TrainerFeature.ClassProgression,new[]{"Profile","ProfileActions","EnsureClass","SaveProfile","SerializeProfile","GrowMarks"}}
-        };
-        readonly MemoryContracts memory;
-        readonly long preferredBase;
-        internal readonly string Hash,Name;
-        internal bool Updated {get{return functions.ContainsKey("Health")&&functions["Health"].Source.Updated;}}
+        readonly Dictionary<TrainerFeature,string[]> dependencies=new Dictionary<TrainerFeature,string[]>();
+        internal readonly string Hash,Name="Decoded runtime contracts";
+        internal int PriceCount {get{return discovery.PriceCount;}}
+        internal int HealthRegister {get{return discovery.HealthRegister;}}
+        internal int OfferStride {get{return discovery.OfferStride;}}
+        internal int OfferRarity {get{return discovery.OfferRarity;}}
         GameLayout(GameImage image)
         {
-            Hash=image.Hash;preferredBase=image.PreferredBase;memory=new MemoryContracts();
-            foreach(string name in BuildCatalog.Layouts.SelectMany(l=>l.Functions).Select(f=>f.Name).Distinct())
+            discovery=new RuntimeDiscovery(image);Hash=image.Hash;
+            dependencies[TrainerFeature.SpellChance]=new[]{"Spell"};dependencies[TrainerFeature.ItemChance]=new[]{"Jewelry"};
+            dependencies[TrainerFeature.RerollCost]=Enumerable.Range(0,PriceCount).Select(i=>"Price"+i).ToArray();
+            dependencies[TrainerFeature.RunControls]=new[]{"Run"};dependencies[TrainerFeature.XpScaling]=new[]{"Xp"};
+            dependencies[TrainerFeature.RunResources]=new[]{"Run"};dependencies[TrainerFeature.Banishes]=new[]{"Run"};
+            dependencies[TrainerFeature.Gold]=new[]{"Run"};dependencies[TrainerFeature.FreeRerolls]=new[]{"Run"};dependencies[TrainerFeature.Shield]=new[]{"Run","Health"};
+            dependencies[TrainerFeature.Stats]=new[]{"Run","Health"};dependencies[TrainerFeature.HealthFloor]=new[]{"Health"};
+            dependencies[TrainerFeature.AutoPick]=new[]{"Run","Choose"};dependencies[TrainerFeature.XpGrant]=new[]{"Run","Xp"};
+            dependencies[TrainerFeature.ClassProgression]=new[]{"Profile","ProfileActions","EnsureClass","SaveProfile"};
+            dependencies[TrainerFeature.ClassMarks]=new[]{"Profile","ProfileActions","SaveProfile","GrowMarks","MarksRecord"};
+            dependencies[TrainerFeature.Lives]=new[]{"Run","Health","Choose"};
+            dependencies[TrainerFeature.CoopAutoPick]=new[]{"Run","Choose","Coop"};Evaluate();
+        }
+        bool Valid(string name){return discovery.Functions.ContainsKey(name)&&!invalid.ContainsKey(name);}
+        string Reason(string name){string reason;return invalid.TryGetValue(name,out reason)||discovery.Failures.TryGetValue(name,out reason)?reason:"No unique decoded instruction context.";}
+        static void Need(bool ok,string reason){if(!ok)throw new Exception(reason);}
+        void Edge(string caller,string callee){Need(discovery.Functions[caller].Calls(Rva(callee)),caller+": expected decoded call to "+callee+" was not found.");}
+        void Fields(params string[] names){foreach(string name in names)Field(name);}
+        void Evaluate()
+        {
+            unavailable.Clear();
+            foreach(var dependency in dependencies)
             {
-                MatchedFunction found=null;bool ambiguous=false;
-                foreach(var layout in BuildCatalog.Layouts)
-                {
-                    var signature=layout.Functions.FirstOrDefault(f=>f.Name==name);if(signature==null)continue;
-                    for(int index=0;index<image.Functions.Count;index++)
-                    {
-                        var candidate=image.Functions[index];
-                        try
-                        {
-                            if(!signature.Matches(image,candidate,memory))continue;
-                            if(signature.Previous!=null&&(index==0||!signature.Previous.Matches(image,image.Functions[index-1],memory)))continue;
-                        }
-                        catch(Exception ex){failures[name]="unverifiable context: "+ex.Message;continue;}
-                        if(found!=null)
-                        {
-                            if(found.Range.Start!=candidate.Start||!Equivalent(found,layout,signature)){ambiguous=true;continue;}
-                            found.Origins.Add(layout.Name);continue;
-                        }
-                        found=new MatchedFunction{Range=candidate,Body=image.Read(candidate.Start,candidate.Length),Signature=signature,Source=layout,
-                            Relocations=image.Relocations.Where(r=>r>=candidate.Start&&r+8<=candidate.Start+candidate.Length).Select(r=>r-candidate.Start).ToArray()};
-                        found.Origins.Add(layout.Name);
-                    }
-                }
-                if(ambiguous){failures[name]="ambiguous function signature or hook contract";continue;}
-                if(found==null){if(!failures.ContainsKey(name))failures[name]="code, member spacing or stack layout has changed";continue;}
-                functions.Add(name,found);memory.Observe(name,found.Signature.Operands,found.Body);
-                foreach(var site in found.Source.Sites.Where(s=>s.Function==name))sites.Add(site.Name,new HookSite(image,found.Range,site));
-            }
-            var origins=new HashSet<string>(BuildCatalog.Layouts.Select(l=>l.Name));
-            foreach(var function in functions.Values)origins.IntersectWith(function.Origins);
-            Name=origins.Count==0?"Discovered desktop contracts":origins.OrderBy(s=>s).First();
-            // Explicitly tie the injected callbacks to the game's existing call
-            // graph. Matching a byte sequence elsewhere must not select a helper.
-            foreach(var feature in requirements)
-            {
-                var missing=feature.Value.Where(name=>!functions.ContainsKey(name)).ToArray();
-                if(missing.Length!=0){unavailable[feature.Key]=String.Join(", ",missing.Select(name=>name+": "+failures[name]).ToArray());continue;}
                 try
                 {
-                    if(feature.Key==TrainerFeature.RunControls)
+                    foreach(string name in dependency.Value)Need(Valid(name),name+": "+Reason(name));
+                    switch(dependency.Key)
                     {
-                        ValidateEdge("Xp","Health");ValidateEdge("Run","Coop");
-                        memory.Require("Attributes","Offers","Clock","OfferNumber","Banishes","Phase","Coop","OfferKind","CoopPhase");
-                    }
-                    if(feature.Key==TrainerFeature.ClassProgression)
-                    {
-                        ValidateEdge("Profile","ProfileActions");ValidateEdge("ProfileActions","EnsureClass");
-                        ValidateEdge("ProfileActions","SaveProfile");ValidateEdge("SaveProfile","SerializeProfile");
-                        memory.Require("Profile");
+                        case TrainerFeature.RerollCost:Need(PriceCount==5,"The complete five-path reroll calculation was not recognized. "+Reason("Prices"));break;
+                        case TrainerFeature.RunResources:Fields("hp","maxHp","phase","clock");break;
+                        case TrainerFeature.Gold:Fields("hp","phase","clock","gold");break;
+                        case TrainerFeature.FreeRerolls:Fields("hp","phase","clock","rerolls");break;
+                        case TrainerFeature.Shield:Fields("hp","phase","clock","shield");break;
+                        case TrainerFeature.Banishes:Fields("hp","phase","clock","banishes");break;
+                        case TrainerFeature.Stats:Fields("hp","phase","clock","attributes");break;
+                        case TrainerFeature.HealthFloor:Fields("maxHp");break;
+                        case TrainerFeature.AutoPick:Fields("hp","phase","clock","coop","offers","offerCount","offerKind");Need(OfferStride>0,"Offer element stride was not decoded.");Need(Field("offerCount")==Field("offers")+8,"Offer vector pointer/count spacing changed.");if(Valid("Health"))Edge("Choose","Health");break;
+                        case TrainerFeature.CoopAutoPick:Fields("hp","phase","clock","coop","coopPhase","offers","offerCount","offerKind");Need(OfferStride>0,"Offer stride is unavailable.");Edge("Run","Coop");break;
+                        case TrainerFeature.XpGrant:Fields("hp","phase","clock");Edge("Run","Xp");break;
+                        case TrainerFeature.XpScaling:Fields("xp");break;
+                        case TrainerFeature.ClassProgression:Fields("profile","talentData","talentCount");Edge("Profile","ProfileActions");Edge("ProfileActions","EnsureClass");Edge("ProfileActions","SaveProfile");break;
+                        case TrainerFeature.ClassMarks:Fields("profile","marksCapacity","marksData","marksCount");Edge("Profile","ProfileActions");Edge("ProfileActions","SaveProfile");break;
+                        case TrainerFeature.Lives:
+                            Fields("attributes");int field=StatField(0x628);
+                            Need(discovery.Functions["Choose"].Instructions.Any(i=>i.MemoryBase!=Register.RSP&&i.MemoryBase!=Register.RBP&&i.MemorySize.GetSize()==4&&unchecked((long)i.MemoryDisplacement64)==field),"Remaining-life field has no independent offer-handler witness.");break;
                     }
                 }
-                catch(Exception ex){unavailable[feature.Key]=ex.Message;}
+                catch(Exception ex){unavailable[dependency.Key]=ex.Message;}
             }
         }
-        static bool Equivalent(MatchedFunction found,LayoutSpec layout,FunctionSpec signature)
-        {
-            var previous=found.Signature;
-            if(previous.Hash!=signature.Hash||previous.Size!=signature.Size||previous.Frame!=signature.Frame||!previous.Masks.SequenceEqual(signature.Masks))return false;
-            Func<FieldOperand,string> operand=o=>o.Group+":"+o.Position+":"+o.Relative+":"+o.Width;
-            if(!previous.Operands.Select(operand).SequenceEqual(signature.Operands.Select(operand)))return false;
-            if(signature.Name=="Health"&&found.Source.Updated!=layout.Updated)return false;
-            Func<SiteSpec,string> site=s=>s.Name+":"+s.Offset+":"+s.Size+":"+s.Continuation+":"+s.Guard;
-            return found.Source.Sites.Where(s=>s.Function==signature.Name).Select(site).SequenceEqual(layout.Sites.Where(s=>s.Function==signature.Name).Select(site));
-        }
-        void ValidateEdge(string caller,string callee)
-        {
-            var source=functions[caller];int target=functions[callee].Range.Start;
-            // Relative call/jump operands are the only masked E8/E9 references.
-            var signature=Template(caller);
-            foreach(int displacement in signature.Masks)
-                if(displacement>0&&(source.Body[displacement-1]==0xe8||source.Body[displacement-1]==0xe9)&&source.Range.Start+displacement+4+BitConverter.ToInt32(source.Body,displacement)==target)return;
-            throw new Exception(caller+": expected call to "+callee+" was not found.");
-        }
-        internal static GameLayout Load(string path)
-        {
-            var candidate=new GameLayout(new GameImage(path));if(candidate.AvailableCount>0)return candidate;
-            var error=new Exception("No trainer features match this game safely. An updated trainer is required. Run --verify-files for details.");
-            error.Data["CompatibilityDetails"]=candidate.Details;throw error;
-        }
-        internal bool HasSite(string name){return sites.ContainsKey(name);}
-        internal bool Supports(TrainerFeature feature){return requirements.ContainsKey(feature)&&!unavailable.ContainsKey(feature);}
-        internal int AvailableCount {get{return requirements.Count-unavailable.Count;}}
-        internal bool Complete {get{return AvailableCount==requirements.Count;}}
+        internal static GameLayout Load(string path){var result=new GameLayout(new GameImage(path));result.RequireAny();return result;}
+        void RequireAny(){if(AvailableCount>0)return;var error=new Exception("No trainer features match this game safely. Run --verify-files for detailed recognition failures.");error.Data["CompatibilityDetails"]=Details;throw error;}
+        internal bool Supports(TrainerFeature feature){return dependencies.ContainsKey(feature)&&!unavailable.ContainsKey(feature);}
+        internal int AvailableCount {get{return dependencies.Count-unavailable.Count;}}
+        internal bool Complete {get{return unavailable.Count==0;}}
         internal static string FeatureName(TrainerFeature feature)
         {
             switch(feature)
             {
-                case TrainerFeature.SpellChance:return "Spell chance";
-                case TrainerFeature.ItemChance:return "Item chance";
-                case TrainerFeature.RerollCost:return "Reroll cost";
-                case TrainerFeature.RunControls:return "Run controls, stats and auto-pick";
-                default:return "Class progression";
+                case TrainerFeature.SpellChance:return "Spell chance";case TrainerFeature.ItemChance:return "Item chance";case TrainerFeature.RerollCost:return "Reroll cost";
+                case TrainerFeature.RunControls:return "Run speed";case TrainerFeature.XpScaling:return "XP multiplier";case TrainerFeature.RunResources:return "Healing and clock";
+                case TrainerFeature.Gold:return "Gold";case TrainerFeature.FreeRerolls:return "Free rerolls";case TrainerFeature.Shield:return "Shield";
+                case TrainerFeature.Banishes:return "Banishes";case TrainerFeature.Stats:return "Stat minimums";case TrainerFeature.HealthFloor:return "Maximum-health floor";
+                case TrainerFeature.AutoPick:return "Auto-pick";case TrainerFeature.CoopAutoPick:return "Co-op auto-pick";case TrainerFeature.XpGrant:return "XP grants";case TrainerFeature.Lives:return "Remaining lives";case TrainerFeature.ClassMarks:return "Class marks";default:return "Class talent points";
             }
         }
         internal string UnavailableNames {get{return String.Join("; ",unavailable.Keys.Select(FeatureName).ToArray());}}
-        internal HookSite Site(string name){return sites[name];}
-        internal int Rva(string function){return functions[function].Range.Start;}
-        internal FunctionSpec Template(string function){return functions[function].Signature;}
-        internal int HealthRegister {get{return Updated?14:6;}}
-        internal int Field(string name){return memory.Field(name);}
-        internal int StatField(int reference){return memory.StatField(reference);}
+        internal bool HasSite(string name){return discovery.Sites.ContainsKey(name);}
+        internal HookSite Site(string name){return discovery.Sites[name];}
+        internal byte[] Frame(HookSite site){return UnwindSupport.Normalize(discovery.Image.UnwindInfo(discovery.Image.FunctionAt(site.Rva)));}
+        internal int Rva(string function){return discovery.Functions[function].Function.Start;}
+        internal RarityRegisters Roll(string name){return discovery.Rarity[name];}
+        internal bool HasField(string name){try{Field(name);return true;}catch{return false;}}
+        internal int Field(string name)
+        {
+            Dictionary<string,int> witnesses;Need(discovery.Fields.TryGetValue(name,out witnesses),name+": no decoded field witness.");
+            var live=witnesses.Where(w=>Valid(w.Key)).ToArray();Need(live.Length>0,name+": no verified field witness remains.");
+            int offset=live[0].Value;Need(live.All(w=>w.Value==offset),name+": decoded field witnesses disagree ("+String.Join(", ",live.Select(w=>w.Key+"=0x"+w.Value.ToString("x")).ToArray())+").");
+            int width=Width(name);Need(offset>=0x100&&offset+width<=0x10000&&offset%width==0,name+": decoded field bounds/alignment failed.");
+            foreach(var other in discovery.Fields)
+            {
+                if(other.Key==name||other.Key=="attributes"||name=="attributes"||Server(other.Key)!=Server(name))continue;
+                var values=other.Value.Where(w=>Valid(w.Key)).Select(w=>w.Value).Distinct().ToArray();if(values.Length!=1)continue;
+                Need((long)offset>=values[0]+Width(other.Key)||(long)values[0]>=offset+width,name+": decoded field overlaps "+other.Key+".");
+            }
+            return offset;
+        }
+        static bool Server(string name){return name=="profile"||name.StartsWith("marks")||name.StartsWith("talent");}
+        static int Width(string name){return name=="offers"||name=="offerCount"||Server(name)?8:name=="phase"||name=="coop"||name=="coopPhase"||name=="offerKind"?1:4;}
+        internal int StatField(int reference){int relative=checked(reference-0x560);Need(relative>=0&&relative+4<=0xd0,"Unknown stat member.");return checked(Field("attributes")+relative);}
         internal void ValidateLive(IntPtr handle,IntPtr imageBase)
         {
-            long delta=imageBase.ToInt64()-preferredBase;
-            foreach(var entry in functions)
+            var image=discovery.Image;long delta=imageBase.ToInt64()-image.PreferredBase;
+            foreach(var entry in discovery.Functions)
             {
-                var function=entry.Value;byte[] expected=(byte[])function.Body.Clone();
-                foreach(int offset in function.Relocations)Array.Copy(BitConverter.GetBytes(unchecked(BitConverter.ToInt64(expected,offset)+delta)),0,expected,offset,8);
-                if(!Native.Equal(expected,Native.Read(handle,Native.Add(imageBase,function.Range.Start),expected.Length)))throw new Exception(entry.Key+": running game code differs from the validated executable. Disable other trainers or restart the game.");
+                var f=entry.Value.Function;var ranges=new Dictionary<int,int>(entry.Value.Dependencies);ranges[f.Start]=f.Length;
+                foreach(var range in ranges)
+                {
+                    byte[] expected=image.Read(range.Key,range.Value);
+                    foreach(int at in image.Relocations.Where(r=>r>=range.Key&&r+8<=range.Key+range.Value))Array.Copy(BitConverter.GetBytes(unchecked(BitConverter.ToInt64(expected,at-range.Key)+delta)),0,expected,at-range.Key,8);
+                    try{if(!Native.Equal(expected,Native.Read(handle,Native.Add(imageBase,range.Key),range.Value)))invalid[entry.Key]="Running instructions or a register-liveness dependency differ from the recognized executable; disable other trainers or restart the game.";}
+                    catch(Exception ex){invalid[entry.Key]="Cannot validate running instructions: "+ex.Message;}
+                }
             }
+            Evaluate();RequireAny();
         }
-        internal string Summary {get{return Name+"; "+AvailableCount+"/5 feature groups available; "+functions.Count+"/18 function contracts and "+sites.Count+" hook/guard sites validated. SHA-256 "+Hash;}}
-        internal string Details
-        {
-            get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,requirements.Keys.Select(feature=>FeatureName(feature)+": "+(Supports(feature)?"available":"UNAVAILABLE: "+unavailable[feature])).ToArray())+Environment.NewLine+"Discovered memory regions:"+Environment.NewLine+memory.Details+Environment.NewLine+"Function contracts:"+Environment.NewLine+String.Join(Environment.NewLine,functions.Select(f=>f.Key+": RVA 0x"+f.Value.Range.Start.ToString("x")+"; "+String.Join(" / ",f.Value.Origins.OrderBy(n=>n).ToArray())).ToArray());}
-        }
+        internal string Summary {get{return Name+"; "+AvailableCount+"/"+dependencies.Count+" independent capabilities available; "+discovery.Functions.Count+" functions and "+discovery.Sites.Count+" sites recognized. SHA-256 "+Hash;}}
+        internal string Details {get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,dependencies.Keys.Select(f=>FeatureName(f)+": "+(Supports(f)?"available":"UNAVAILABLE: "+unavailable[f])).ToArray())+Environment.NewLine+"Decoded fields:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Fields.Select(f=>f.Key+": "+String.Join(", ",f.Value.Select(w=>w.Key+" +0x"+w.Value.ToString("x")+(Valid(w.Key)?"":" (unavailable)")).ToArray())).ToArray())+Environment.NewLine+"Recognition failures:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Failures.Select(f=>f.Key+": "+f.Value).ToArray());}}
     }
 }

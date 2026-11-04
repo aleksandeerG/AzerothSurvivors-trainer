@@ -2,12 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 namespace AzerothTrainer
 {
     internal sealed class ImageFunction
     {
-        internal readonly int Start,Length;
-        internal ImageFunction(int start,int end){Start=start;Length=end-start;}
+        internal readonly int Start,Length,Unwind;
+        internal ImageFunction(int start,int end,int unwind=0){Start=start;Length=end-start;Unwind=unwind;}
     }
     internal sealed class GameImage
     {
@@ -19,6 +20,7 @@ namespace AzerothTrainer
         readonly List<Section> sections=new List<Section>();
         internal readonly List<ImageFunction> Functions=new List<ImageFunction>();
         internal readonly List<int> Relocations=new List<int>();
+        internal readonly Dictionary<int,string> Imports=new Dictionary<int,string>();
         internal readonly string Path,Hash;
         internal readonly long PreferredBase;
         internal GameImage(string path)
@@ -41,7 +43,18 @@ namespace AzerothTrainer
             {
                 int start=BitConverter.ToInt32(entries,i),end=BitConverter.ToInt32(entries,i+4);
                 if(start<=previous||end<=start||!Executable(start,end-start))throw new Exception("Invalid game runtime-function range.");
-                Functions.Add(new ImageFunction(start,end));previous=start;
+                Functions.Add(new ImageFunction(start,end,BitConverter.ToInt32(entries,i+8)));previous=start;
+            }
+            int imports=I32(pe+24+112+8),importSize=I32(pe+24+116+8);
+            for(int at=0;imports!=0&&at+20<=importSize;at+=20)
+            {
+                byte[] descriptor=Read(checked(imports+at),20);int names=BitConverter.ToInt32(descriptor,0),library=BitConverter.ToInt32(descriptor,12),tableRva=BitConverter.ToInt32(descriptor,16);if(library==0)break;
+                string dll=Ascii(library);if(names==0)names=tableRva;
+                for(int index=0;index<8192;index++)
+                {
+                    ulong value=BitConverter.ToUInt64(Read(checked(names+index*8),8),0);if(value==0)break;if((value>>63)!=0)continue;
+                    if(value>Int32.MaxValue-2)throw new Exception("Invalid import name.");Imports[checked(tableRva+index*8)]=dll+"!"+Ascii((int)value+2);
+                }
             }
             int reloc=I32(pe+24+112+5*8),relocSize=I32(pe+24+116+5*8);
             if(reloc!=0&&relocSize>0)
@@ -66,6 +79,10 @@ namespace AzerothTrainer
         int I32(int at){Bounds(at,4);return BitConverter.ToInt32(bytes,at);}
         int U16(int at){Bounds(at,2);return BitConverter.ToUInt16(bytes,at);}
         long I64(int at){Bounds(at,8);return BitConverter.ToInt64(bytes,at);}
+        string Ascii(int rva)
+        {
+            var text=new StringBuilder();for(int i=0;i<512;i++){byte value=Read(checked(rva+i),1)[0];if(value==0)return text.ToString();if(value>127)throw new Exception("Invalid import text.");text.Append((char)value);}throw new Exception("Unterminated import text.");
+        }
         internal byte[] Read(int rva,int count)
         {
             foreach(var section in sections)
@@ -82,6 +99,31 @@ namespace AzerothTrainer
         {
             foreach(var section in sections)if(rva>=section.Rva&&(long)rva<(long)section.Rva+Math.Max(section.Size,section.VirtualSize))return true;
             return false;
+        }
+        internal ImageFunction FunctionAt(int rva)
+        {
+            int lo=0,hi=Functions.Count-1;
+            while(lo<=hi){int mid=lo+(hi-lo)/2;var f=Functions[mid];if(rva<f.Start)hi=mid-1;else if(rva>=f.Start+f.Length)lo=mid+1;else return f;}
+            return null;
+        }
+        internal IEnumerable<int> Find(byte[] needle,bool executable)
+        {
+            if(needle.Length==0)yield break;
+            foreach(var section in sections)
+            {
+                if(executable&&(section.Flags&0x20000000)==0)continue;
+                int end=section.Raw+section.Size-needle.Length+1;
+                for(int at=section.Raw;at<end;)
+                {
+                    at=Array.IndexOf(bytes,needle[0],at,end-at);if(at<0)break;
+                    bool match=true;for(int i=1;i<needle.Length;i++)if(bytes[at+i]!=needle[i]){match=false;break;}
+                    if(match)yield return section.Rva+at-section.Raw;at++;
+                }
+            }
+        }
+        internal byte[] UnwindInfo(ImageFunction function)
+        {
+            byte[] head=Read(function.Unwind,4);return Read(function.Unwind,4+((head[2]+1)&~1)*2);
         }
         internal static string Digest(byte[] value){using(var sha=SHA256.Create())return BitConverter.ToString(sha.ComputeHash(value)).Replace("-","").ToLowerInvariant();}
     }

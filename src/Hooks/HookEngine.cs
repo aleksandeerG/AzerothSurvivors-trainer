@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 
 namespace AzerothTrainer
 {
@@ -20,19 +21,21 @@ namespace AzerothTrainer
             var b=new List<byte>(Hex("48 B8"));b.AddRange(BitConverter.GetBytes(target.ToInt64()));b.AddRange(Hex("FF E0"));
             if(size<12)throw new ArgumentOutOfRangeException("size");while(b.Count<size)b.Add(0x90);return b.ToArray();
         }
-        internal static byte[] TailJump(IntPtr target)
+        internal static byte[] TailJump(IntPtr target,int register=11)
         {
-            // Use the caller-owned outgoing shadow area without changing RSP or
-            // registers. ModRM mode 01 deliberately excludes epilogue decoding.
-            var b=new List<byte>(Hex("C7 44 24 08"));byte[] pointer=BitConverter.GetBytes(target.ToInt64());
-            for(int i=0;i<4;i++)b.Add(pointer[i]);b.AddRange(Hex("C7 44 24 0C"));for(int i=4;i<8;i++)b.Add(pointer[i]);b.AddRange(Hex("FF 64 24 08"));return b.ToArray();
+            // A decoded liveness proof selects R10 or R11. This uses neither
+            // game locals nor outgoing shadow space; register mode also avoids
+            // Windows treating the jump as a completed function epilogue.
+            if(register!=10&&register!=11)throw new ArgumentOutOfRangeException("register");
+            var b=new List<byte>{0x49,(byte)(0xb8+register-8)};b.AddRange(BitConverter.GetBytes(target.ToInt64()));b.AddRange(new byte[]{0x41,0xff,(byte)(0xe0+register-8)});return b.ToArray();
         }
-        internal static byte[] Build(IntPtr continuation,int variant)
+        internal static byte[] Build(IntPtr continuation,RarityRegisters registers,int tailRegister=11)
         {
-            // 0: spells -> EAX; 1: jewelry -> ESI; 2: jewelry -> R9D.
-            int[] w=variant==0?new int[]{12,6,13,14}:new int[]{14,9,8,15};
-            var a=new Assembler();
-            a.Sse(0x5e,0,2,true); // Normalize the game's own RNG result.
+            int[] w=registers.Weights;var a=new Assembler();FrameCode.Enter(a);FrameCode.Save(a);
+            // XMM2 is volatile across the game's RNG call. Reconstruct its total
+            // from the five decoded callee-saved weight registers instead.
+            a.Sse(0x28,2,w[0],false);for(int i=1;i<5;i++)a.Sse(0x58,2,w[i],true);
+            a.Sse(0x5e,0,2,true);
             a.Rip("F3 0F 10 1D",DataOffset);a.Sse(0x2e,0,3,false);a.Branch("0F 82","legendary");
             a.Sse(0x5c,0,3,true);a.Rip("F3 0F 10 25",DataOffset+4);
             a.Sse(0x5c,4,3,true);a.Sse(0x5e,0,4,true);
@@ -43,10 +46,11 @@ namespace AzerothTrainer
                 a.Sse(0x2e,0,w[i],false);a.Branch("0F 82","selected");
                 a.Sse(0x5c,0,w[i],true);a.Emit("FF C0");
             }
-            a.Branch("E9","selected");a.Label("legendary");a.Emit("B8 04 00 00 00");
+            a.Branch("E9","selected");a.Label("legendary");a.Sse(0x5e,0,3,true);a.Sse(0x59,0,w[4],true);a.Emit("B8 04 00 00 00");
             a.Label("selected");
-            if(variant==1)a.Emit("89 C6");else if(variant==2)a.Emit("41 89 C1");
-            a.Bytes.AddRange(TailJump(continuation));return a.Finish();
+            a.Emit("89 84 24 10 01 00 00 F3 0F 11 84 24 18 01 00 00"); // selected rank and residual RNG value
+            FrameCode.Restore(a);a.LoadStack32(registers.Result,0x110);a.Emit("F3 0F 10 84 24 18 01 00 00");FrameCode.Leave(a);
+            a.Bytes.AddRange(TailJump(continuation,tailRegister));return a.Finish();
         }
     }
     internal sealed class Assembler
@@ -74,6 +78,12 @@ namespace AzerothTrainer
             if(scalar)Bytes.Add(0xf3);int rex=0x40|(dst>=8?4:0)|(src>=8?1:0);
             if(rex!=0x40)Bytes.Add((byte)rex);Bytes.Add(0x0f);Bytes.Add(op);Bytes.Add((byte)(0xc0+(dst%8)*8+src%8));
         }
+        internal void SseRip(byte op,int register,int target)
+        {
+            Emit("F3");if(register>=8)Emit("44");Emit("0F");Bytes.Add(op);Bytes.Add((byte)(5+(register%8)*8));Bytes.AddRange(BitConverter.GetBytes(target-(Bytes.Count+4)));
+        }
+        internal void LoadStack32(int register,int offset)
+        {if(register>=8)Emit("44");Emit("8B");Bytes.Add((byte)(0x84+(register%8)*8));Emit("24");Bytes.AddRange(BitConverter.GetBytes(offset));}
         internal byte[] Finish()
         {
             foreach(var p in branches){byte[] d=BitConverter.GetBytes(labels[p.Value]-p.Key-4);for(int i=0;i<4;i++)Bytes[p.Key+i]=d[i];}
@@ -87,29 +97,39 @@ namespace AzerothTrainer
         internal const int BanishRequest=320,GoldRequest=328,FreeRerollRequest=336,ShieldRequest=344,HealRequest=352,XpRequest=360,AdvanceRequest=368;
         internal static byte[] Build(IntPtr start,IntPtr continuation,IntPtr image,GameLayout layout)
         {
-            var a=new Assembler(layout);a.Emit("F3 0F 11 4C 24 78"); // movss [rsp+78],xmm1 (unscaled frame time)
-            SpeedCode.Emit(a);FrameCode.Save(a);FrameCode.Pointer(a,Native.Add(start,4096));
-            RunCommands.Track(a);
-            Request(a,BanishRequest,layout.Field("banishes"),"banish");Request(a,GoldRequest,layout.Field("gold"),"gold");
-            Request(a,FreeRerollRequest,layout.Field("rerolls"),"free");Request(a,ShieldRequest,layout.Field("shield"),"shield");
-            RunCommands.Take(a,XpRequest,"noXp");
-            a.Emit("44 89 D2 48 89 F1"); // mov edx,r10d; mov rcx,rsi (Game, grant)
-            FrameCode.Call(a,Native.Add(image,layout.Rva("Xp"))); // game XP award: enabled XP scaling also applies to grants
-            a.Label("noXp");FrameCode.Pointer(a,Native.Add(start,4096));
-            AutoPickCode.Emit(a,start,image,layout);RunStat.Emit(a,layout);
-            a.Emit("83 78 10 00");a.Branch("0F 84","noBan"); // cmp [data+UnlimitedBanish],0
-            a.Emit("C7 86 $banishes 0F 27 00 00");a.Label("noBan"); // mov [Game+F30],9999
-            a.Emit("83 78 14 00");a.Branch("0F 84","noReroll");
-            a.Emit("C7 86 $rerolls 0F 27 00 00");a.Label("noReroll"); // mov [Game+62C],9999
-            RunCommands.Take(a,HealRequest,"autoHeal");a.Branch("E9","heal");
-            a.Label("autoHeal");a.Emit("83 78 24 00");a.Branch("0F 84","noHeal"); // cmp [data+AutoHeal],0
-            a.Emit("83 BE $hp 00");a.Branch("0F 8E","noHeal"); // cmp HP,0: no automatic revival
-            a.Label("heal");a.Emit("44 8B 96 $maxHp 44 89 96 $hp");a.Label("noHeal"); // copy max HP bits to current HP
-            RunCommands.Take(a,AdvanceRequest,"noAdvance");
-            a.Emit("66 41 0F 6E C2 F3 0F 58 86 $clock F3 0F 11 86 $clock F3 0F 11 40 68"); // movd xmm0,r10d; addss xmm0,clock; store clock and LastClock
-            a.Label("noAdvance");a.Label("runDone");FrameCode.Restore(a);
-            a.Emit("80 B9 $coop 00"); // replay cmp [rcx+F5E],0 for the original solo/co-op branch
-            a.Bytes.AddRange(RarityCode.TailJump(continuation));return a.Finish();
+            var a=new Assembler(layout);FrameCode.Enter(a);FrameCode.Save(a);
+            a.Emit("48 89 B4 24 10 01 00 00 48 89 CE F3 0F 11 4C 24 78"); // save RSI; RSI=Game; save real frame time
+            FrameCode.Pointer(a,Native.Add(start,4096));
+            bool actions=layout.Supports(TrainerFeature.RunResources),banishes=layout.Supports(TrainerFeature.Banishes);
+            bool tracking=actions||banishes||layout.Supports(TrainerFeature.Gold)||layout.Supports(TrainerFeature.FreeRerolls)||layout.Supports(TrainerFeature.Shield)||layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.AutoPick)||layout.Supports(TrainerFeature.XpGrant)||layout.Supports(TrainerFeature.Lives);
+            if(tracking)RunCommands.Track(a);
+            if(banishes)
+            {
+                Request(a,BanishRequest,layout.Field("banishes"),"banish");a.Emit("83 78 10 00");a.Branch("0F 84","noBan");a.Emit("C7 86 $banishes 0F 27 00 00");a.Label("noBan");
+            }
+            if(layout.Supports(TrainerFeature.Gold))Request(a,GoldRequest,layout.Field("gold"),"gold");
+            if(layout.Supports(TrainerFeature.Shield))Request(a,ShieldRequest,layout.Field("shield"),"shield");
+            if(layout.Supports(TrainerFeature.FreeRerolls))
+            {
+                Request(a,FreeRerollRequest,layout.Field("rerolls"),"free");
+                a.Emit("83 78 14 00");a.Branch("0F 84","noReroll");a.Emit("C7 86 $rerolls 0F 27 00 00");a.Label("noReroll");
+            }
+            if(actions)
+            {
+                RunCommands.Take(a,HealRequest,"autoHeal");a.Branch("E9","heal");a.Label("autoHeal");a.Emit("83 78 24 00");a.Branch("0F 84","noHeal");a.Emit("83 BE $hp 00");a.Branch("0F 8E","noHeal");
+                a.Label("heal");a.Emit("44 8B 96 $maxHp 44 89 96 $hp");a.Label("noHeal");
+                RunCommands.Take(a,AdvanceRequest,"noAdvance");a.Emit("66 41 0F 6E C2 F3 0F 58 86 $clock F3 0F 11 86 $clock F3 0F 11 40 68");a.Label("noAdvance");
+            }
+            if(layout.Supports(TrainerFeature.XpGrant))
+            {
+                RunCommands.Take(a,XpRequest,"noXp");a.Emit("44 89 D2 48 89 F1");FrameCode.Call(a,Native.Add(image,layout.Rva("Xp")));a.Label("noXp");FrameCode.Pointer(a,Native.Add(start,4096));
+            }
+            if(layout.Supports(TrainerFeature.AutoPick))AutoPickCode.Emit(a,start,image,layout);
+            if(layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.Lives))RunStat.Emit(a,layout);
+            a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);a.Rip("F3 0F 59 0D",4096);FrameCode.Leave(a);
+            // Replay the decoded register assignments and branch comparison.
+            a.Bytes.AddRange(layout.Site("RunHook").Original);
+            a.Bytes.AddRange(RarityCode.TailJump(continuation,layout.Site("RunHook").TailRegister));return a.Finish();
         }
         static void Request(Assembler a,int request,int field,string label)
         {
@@ -127,12 +147,13 @@ namespace AzerothTrainer
         readonly int guardLength;
         readonly Func<IntPtr,byte[]> builder;
         readonly int sourceRva;
+        readonly byte[] sourceFrame;
         bool retained,registered;
         internal IntPtr Cave {get;private set;}
         byte[] installed;
         internal bool Enabled {get;private set;}
-        internal MemoryPatch(IntPtr h,int processId,IntPtr site,byte[] original,int guard,Func<IntPtr,byte[]> code,int unwindRva=-1)
-        {handle=h;pid=processId;Site=site;Original=original;guardLength=guard;builder=code;sourceRva=unwindRva;}
+        internal MemoryPatch(IntPtr h,int processId,IntPtr site,byte[] original,int guard,Func<IntPtr,byte[]> code,int unwindRva=-1,byte[] frame=null)
+        {handle=h;pid=processId;Site=site;Original=original;guardLength=guard;builder=code;sourceRva=unwindRva;sourceFrame=frame;}
         internal void Validate()
         {
             if(!Native.Equal(Native.Read(handle,Site,Original.Length),Original))
@@ -155,7 +176,7 @@ namespace AzerothTrainer
                     {
                         if(retained)throw new Exception("An earlier unwind registration failed. Close the game before reconnecting.");
                         byte[] generated=builder(Cave);Native.Write(handle,Cave,generated);
-                        if(sourceRva>=0){retained=true;UnwindSupport.Register(handle,pid,Cave,generated.Length,sourceRva);registered=true;}
+                        if(sourceRva>=0){retained=true;UnwindSupport.Register(handle,pid,Cave,generated.Length,sourceRva,sourceFrame);registered=true;}
                     }
                     if(initialize!=null)initialize(this);
                     uint old;if(!Native.VirtualProtectEx(handle,Cave,(UIntPtr)4096,0x20,out old))throw Native.Error("Cannot prepare trainer instructions");
@@ -240,6 +261,26 @@ namespace AzerothTrainer
         internal string CompatibilityDetails {get{return layout.Details;}}
         internal string UnavailableFeatures {get{return layout.UnavailableNames;}}
         internal bool Supports(TrainerFeature feature){return layout.Supports(feature);}
+        internal bool HighestRaritySupported {get{return layout.OfferRarity>0;}}
+        internal int[] AvailableClasses
+        {
+            get
+            {
+                if(Exited||profile==null||!profile.Enabled)return new int[0];
+                IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(profile.Cave,4096+ProfileCode.Owner),8),0));if(owner==IntPtr.Zero)return new int[0];
+                var classes=new HashSet<int>();
+                foreach(bool talent in new[]{true,false})
+                {
+                    if(!layout.HasField(talent?"talentCount":"marksCount"))continue;
+                    long count=BitConverter.ToInt64(Native.Read(handle,Native.Add(owner,layout.Field(talent?"talentCount":"marksCount")),8),0);
+                    if(count<0||count>256)throw new Exception("The game's class record count is invalid.");if(count==0)continue;
+                    IntPtr data=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(owner,layout.Field(talent?"talentData":"marksData")),8),0));
+                    int stride=talent?40:8;byte[] records=Native.Read(handle,data,checked((int)count*stride));
+                    for(int i=0;i<count;i++){int id=records[i*stride+(talent?4:0)];if(id!=0)classes.Add(id);}
+                }
+                return classes.OrderBy(id=>id).ToArray();
+            }
+        }
         readonly IntPtr handle;
         readonly List<MemoryPatch> all=new List<MemoryPatch>(),rarity=new List<MemoryPatch>{null,null,null},prices=new List<MemoryPatch>();
         readonly MemoryPatch run,xp,profile,health;
@@ -260,17 +301,17 @@ namespace AzerothTrainer
                 if(Supports(TrainerFeature.ItemChance)){AddRarity(imageBase,layout.Site("Jewelry1"),1);AddRarity(imageBase,layout.Site("Jewelry2"),2);}
                 if(Supports(TrainerFeature.RunControls))
                 {
-                    HookSite tick=layout.Site("RunHook"),award=layout.Site("XpHook"),maximum=layout.Site("HealthHook");
+                    HookSite tick=layout.Site("RunHook");
                     run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
-                    xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});
-                    health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});
                 }
-                if(Supports(TrainerFeature.ClassProgression))
+                if(Supports(TrainerFeature.XpScaling)){HookSite award=layout.Site("XpHook");xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});}
+                if(Supports(TrainerFeature.HealthFloor)){HookSite maximum=layout.Site("HealthHook");health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});}
+                if(Supports(TrainerFeature.ClassProgression)||Supports(TrainerFeature.ClassMarks))
                 {
                     HookSite server=layout.Site("ProfileHook");
                     profile=AddGenerated(imageBase,server,delegate(IntPtr c){return ProfileCode.Build(c,Native.Add(imageBase,server.Continuation),imageBase,layout);});
                 }
-                for(int i=0;Supports(TrainerFeature.RerollCost)&&i<5;i++)
+                for(int i=0;Supports(TrainerFeature.RerollCost)&&i<layout.PriceCount;i++)
                 {
                     HookSite branchSite=layout.Site("PriceBranch"+i),costSite=layout.Site("PriceCost"+i);
                     var branch=new MemoryPatch(handle,game.Id,Native.Add(imageBase,branchSite.Rva),branchSite.Original,branchSite.Guard,null);
@@ -278,22 +319,17 @@ namespace AzerothTrainer
                     prices.Add(branch);prices.Add(cost);all.Add(branch);all.Add(cost);
                 }
                 foreach(var patch in all)patch.Validate();
-                foreach(string name in new string[]{"GuardCoop","GuardHud"})
-                {
-                    if(!layout.HasSite(name))continue;
-                    var guard=layout.Site(name);
-                    if(!Native.Equal(Native.Read(handle,Native.Add(imageBase,guard.Rva),guard.Original.Length),guard.Original))throw new Exception("Another trainer has modified the game. Disable it before connecting.");
-                }
             }
             catch{Native.CloseHandle(handle);throw;}
         }
         void AddRarity(IntPtr image,HookSite site,int variant)
         {
-            var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,delegate(IntPtr unused){return RarityCode.Build(Native.Add(image,site.Continuation),variant);},site.Rva);
+            var registers=layout.Roll(variant==0?"Spell":"Jewelry"+variant);
+            var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,delegate(IntPtr unused){return RarityCode.Build(Native.Add(image,site.Continuation),registers,site.TailRegister);},site.Rva,layout.Frame(site));
             rarity[variant]=patch;all.Add(patch);
         }
         MemoryPatch AddGenerated(IntPtr image,HookSite site,Func<IntPtr,byte[]> code)
-        {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva);all.Add(patch);return patch;}
+        {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva,layout.Frame(site));all.Add(patch);return patch;}
         internal static PatchSession Attach()
         {
             Process selected=GameLocator.FindRunning();
@@ -311,8 +347,17 @@ namespace AzerothTrainer
             ValidateOptions(options);
             RequireOptions(options);
             if(Exited)throw new Exception("The game has exited.");
+            if(health!=null)
+            {
+                health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
+                health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
+            }
+            if(xp!=null)
+            {
+                if(options.XpEnabled){xp.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));p.Data(XpCode.CarryOffset,new byte[XpCode.CarrySlots*XpCode.CarryStride]);});xp.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));}else xp.Remove();
+            }
             if(run!=null)ApplyRunOptions(options);
-            if(profile!=null)profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));});
+            if(profile!=null)profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));p.Data(16,new byte[24]);});
             for(int index=0;index<rarity.Count;index++)
             {
                 var p=rarity[index];if(p==null)continue;double chance=index==0?options.SpellChance:options.ItemChance;
@@ -330,8 +375,8 @@ namespace AzerothTrainer
                 if(prices[i].Enabled!=options.FixedCost||prices[i+1].Enabled!=options.FixedCost)priceChange=true;
                 if(options.FixedCost&&prices[i+1].Enabled)
                 {
-                    byte[] bytes=Native.Read(handle,prices[i+1].Site,5);
-                    if(BitConverter.ToInt32(bytes,1)!=options.RerollCost)priceChange=true;
+                    byte[] bytes=Native.Read(handle,prices[i+1].Site,prices[i+1].Original.Length);
+                    if(BitConverter.ToInt32(bytes,bytes.Length-4)!=options.RerollCost)priceChange=true;
                 }
             }
             if(priceChange)
@@ -347,8 +392,8 @@ namespace AzerothTrainer
                         if(options.FixedCost)
                         {
                             var branch=prices[i];var cost=prices[i+1];
-                            byte[] j=new byte[5];j[0]=0xe9;Array.Copy(BitConverter.GetBytes((int)(cost.Site.ToInt64()-branch.Site.ToInt64()-5)),0,j,1,4);
-                            byte[] value=(byte[])cost.Original.Clone();Array.Copy(BitConverter.GetBytes(options.RerollCost),0,value,1,4);
+                            byte[] j=new byte[branch.Original.Length];for(int b=0;b<j.Length;b++)j[b]=0x90;j[0]=0xe9;Array.Copy(BitConverter.GetBytes((int)(cost.Site.ToInt64()-branch.Site.ToInt64()-5)),0,j,1,4);
+                            byte[] value=(byte[])cost.Original.Clone();Array.Copy(BitConverter.GetBytes(options.RerollCost),0,value,value.Length-4,4);
                             cost.Replace(value);branch.Replace(j);
                         }
                         else{prices[i].Remove();prices[i+1].Remove();}
@@ -359,8 +404,6 @@ namespace AzerothTrainer
         }
         void ApplyRunOptions(TrainerOptions options)
         {
-            health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
-            health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
             run.Install(null,delegate(MemoryPatch p)
             {
                 p.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
@@ -370,7 +413,6 @@ namespace AzerothTrainer
                 p.Data(RunStat.DataOffset,new byte[RunStat.All.Length*RunStat.Stride]);
             });
             run.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
-            if(options.XpEnabled){xp.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));p.Data(XpCode.CarryOffset,new byte[XpCode.CarrySlots*XpCode.CarryStride]);});xp.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));}else xp.Remove();
             run.Data(AutoPickCode.Delay,BitConverter.GetBytes((float)options.AutoPickDelay));
             run.Data(AutoPickCode.SpellMode,BitConverter.GetBytes(options.AutoSpellMode));run.Data(AutoPickCode.ItemMode,BitConverter.GetBytes(options.AutoItemMode));
             for(int i=0;i<RunStat.All.Length;i++)run.Data(RunStat.DataOffset+i*RunStat.Stride,BitConverter.GetBytes((ulong)RunStat.All[i].Bits(options.StatValues[i])|(options.StatEnabled[i]?1UL<<32:0)));
@@ -385,8 +427,13 @@ namespace AzerothTrainer
             if(o.SpellLegendary)Require(TrainerFeature.SpellChance);
             if(o.ItemLegendary)Require(TrainerFeature.ItemChance);
             if(o.FixedCost)Require(TrainerFeature.RerollCost);
-            if(o.SpeedEnabled||o.XpEnabled||o.AutoHeal||o.UnlimitedBanish||o.UnlimitedReroll||o.AutoSpellMode!=0||o.AutoItemMode!=0||Array.Exists(o.StatEnabled,delegate(bool active){return active;}))Require(TrainerFeature.RunControls);
+            if(o.SpeedEnabled)Require(TrainerFeature.RunControls);if(o.XpEnabled)Require(TrainerFeature.XpScaling);
+            if(o.AutoHeal)Require(TrainerFeature.RunResources);if(o.UnlimitedReroll)Require(TrainerFeature.FreeRerolls);if(o.UnlimitedBanish)Require(TrainerFeature.Banishes);
+            if(o.AutoSpellMode!=0||o.AutoItemMode!=0)Require(TrainerFeature.AutoPick);
+            if((o.AutoSpellMode==5||o.AutoItemMode==5)&&layout.OfferRarity==0)throw new Exception("Highest rarity is unavailable: the offer rarity field was not recognized.");
+            for(int i=0;i<o.StatEnabled.Length;i++)if(o.StatEnabled[i])Require(StatFeature(i));
         }
+        internal static TrainerFeature StatFeature(int index){return index==0?TrainerFeature.HealthFloor:RunStat.All[index].Field==0x628?TrainerFeature.Lives:TrainerFeature.Stats;}
         internal static void ValidateOptions(TrainerOptions o)
         {
             foreach(double p in new double[]{o.SpellChance,o.ItemChance})if(Double.IsNaN(p)||Double.IsInfinity(p)||p<0||p>100)throw new ArgumentOutOfRangeException("chance");
@@ -402,7 +449,7 @@ namespace AzerothTrainer
         internal void Advance(float seconds){if(Single.IsNaN(seconds)||Single.IsInfinity(seconds)||seconds<0||seconds>3600)throw new ArgumentOutOfRangeException("seconds");QueueBits(RunCode.AdvanceRequest,BitConverter.GetBytes(seconds));}
         void QueueBits(int offset,byte[] bytes)
         {
-            Require(TrainerFeature.RunControls);
+            Require(offset==RunCode.BanishRequest?TrainerFeature.Banishes:offset==RunCode.XpRequest?TrainerFeature.XpGrant:offset==RunCode.GoldRequest?TrainerFeature.Gold:offset==RunCode.FreeRerollRequest?TrainerFeature.FreeRerolls:offset==RunCode.ShieldRequest?TrainerFeature.Shield:TrainerFeature.RunResources);
             if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
             ulong state=BitConverter.ToUInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),8),0);
             IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0));
@@ -423,21 +470,19 @@ namespace AzerothTrainer
         internal uint SetMarks(int classId,int rawTenths){if(rawTenths<0||rawTenths>10000000)throw new ArgumentOutOfRangeException("marks");return QueueProfile(ProfileCode.MarksRequest,classId,rawTenths);}
         uint QueueProfile(int offset,int classId,int value)
         {
-            Require(TrainerFeature.ClassProgression);
-            if(classId<1||classId>11||classId==6||classId==10)throw new ArgumentOutOfRangeException("class");
-            if(Exited||!profile.Enabled)throw new Exception("Enable the trainer first.");BackupProfile();
-            uint sequence=offset==ProfileCode.TalentRequest?checked(++talentSequence):checked(++marksSequence);
-            profile.Data(offset,BitConverter.GetBytes(ProfileCode.PackRequest(sequence,classId,value)));return sequence;
+            Require(offset==ProfileCode.MarksRequest?TrainerFeature.ClassMarks:TrainerFeature.ClassProgression);
+            if(classId<1||classId>255)throw new ArgumentOutOfRangeException("class");
+            if(Exited||!profile.Enabled)throw new Exception("Enable the trainer first.");ProfileBackup.Create(handle);
+            using(var frozen=new FrozenThreads(Game.Id))
+            {
+                if(!AvailableClasses.Contains(classId))throw new Exception("That class is not present in the loaded game profile. Open its Armory or play it once before editing.");
+                uint sequence=offset==ProfileCode.TalentRequest?checked(++talentSequence):checked(++marksSequence);
+                profile.Data(offset,BitConverter.GetBytes(ProfileCode.PackRequest(sequence,classId,value)));return sequence;
+            }
         }
         internal int TalentResult(uint sequence){return ReadProfileResult(ProfileCode.TalentResult,sequence);}
         internal int MarksResult(uint sequence){return ReadProfileResult(ProfileCode.MarksResult,sequence);}
         int ReadProfileResult(int offset,uint sequence){if(Exited||profile==null||!profile.Enabled)return 0;return ProfileCode.CompletedStatus(BitConverter.ToUInt64(Native.Read(handle,Native.Add(profile.Cave,4096+offset),8),0),sequence);}
-        internal static void BackupProfile()
-        {
-            string source=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"wenilla-rogue","characters.txt");
-            if(!File.Exists(source))return;string folder=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"trainer","backups");Directory.CreateDirectory(folder);
-            File.Copy(source,Path.Combine(folder,"characters-"+DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff")+"-"+Guid.NewGuid().ToString("N").Substring(0,6)+".txt"));
-        }
         internal void SetBanishes(int value){Queue(RunCode.BanishRequest,value,9999);}
         internal void SetGold(int value){Queue(RunCode.GoldRequest,value,100000);}
         void Queue(int offset,int value,int maximum)

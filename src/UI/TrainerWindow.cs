@@ -16,7 +16,13 @@ namespace AzerothTrainer
         readonly Label status=new Label(),resourceHelp=new Label(),compatibility=new Label();readonly Timer timer=new Timer();readonly ToolTip compatibilityTip=new ToolTip();
         readonly Button enable=new Button(),apply=new Button(),disable=new Button();
         readonly Dictionary<Control,TrainerFeature> connectedFeatures=new Dictionary<Control,TrainerFeature>();
-        readonly int[] classIds={1,2,3,4,5,7,8,9,11};
+        Button resourceAction;
+        sealed class LoadedClass
+        {
+            internal int Id;
+            public override string ToString(){switch(Id){case 1:return "Warrior";case 2:return "Paladin";case 3:return "Hunter";case 4:return "Rogue";case 5:return "Priest";case 7:return "Shaman";case 8:return "Mage";case 9:return "Warlock";case 11:return "Druid";default:return "Class ID "+Id;}}
+        }
+        int SelectedClass(){var value=classKind.SelectedItem as LoadedClass;if(value==null)throw new Exception("Wait for the game profile to load its class records.");return value.Id;}
         PatchSession session;bool busy;uint talentPending,marksPending;
         internal TrainerWindow()
         {
@@ -39,15 +45,15 @@ namespace AzerothTrainer
             Label(run.Controls,"Run resource",18,202,180,24,null);resourceKind.SetBounds(18,231,220,30);ComboStyle(resourceKind);
             resourceKind.Items.AddRange(new object[]{"Gold (set)","Banishes (set)","Free rerolls (set)","Shield (set)","Run XP (grant)"});run.Controls.Add(resourceKind);
             Number(run.Controls,resource,252,231,135,0,100000,1000,0,1);resourceKind.SelectedIndexChanged+=delegate{ResourceLimits();};resourceKind.SelectedIndex=0;
-            Button(run.Controls,"Set / grant",407,228,130,SetResource,true);Button(run.Controls,"Heal now",551,228,130,delegate{session.Heal();Queued("Healing");},true);
-            Number(run.Controls,advance,18,293,150,0,3600,60,0,1);Button(run.Controls,"Advance clock (seconds)",184,290,235,delegate{session.Advance((float)advance.Value);Queued("Clock advance");},true);
+            resourceAction=Button(run.Controls,"Set / grant",407,228,130,SetResource,true,TrainerFeature.RunResources);Button(run.Controls,"Heal now",551,228,130,delegate{session.Heal();Queued("Healing");},true,TrainerFeature.RunResources);
+            Number(run.Controls,advance,18,293,150,0,3600,60,0,1);Button(run.Controls,"Advance clock (seconds)",184,290,235,delegate{session.Advance((float)advance.Value);Queued("Clock advance");},true,TrainerFeature.RunResources);
             Label(run.Controls,"High speeds can skip collisions. Clock advances bring spawns forward.",18,341,660,45,new Font("Segoe UI",9));
             Label(profile.Controls,"Class to edit",18,21,210,27,null);classKind.SetBounds(235,19,280,30);ComboStyle(classKind);
-            classKind.Items.AddRange(new object[]{"Warrior","Paladin","Hunter","Rogue","Priest","Shaman","Mage","Warlock","Druid"});classKind.SelectedIndex=0;profile.Controls.Add(classKind);
+            classKind.Items.Add("Connect to load classes");classKind.SelectedIndex=0;profile.Controls.Add(classKind);
             Label(profile.Controls,"Earned talent points",18,83,250,27,null);Number(profile.Controls,talents,281,80,125,0,51,51,0,1);
-            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);ProfileQueued("Class talent points");},true,TrainerFeature.ClassProgression);
+            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(SelectedClass(),(int)talents.Value);ProfileQueued("Class talent points");},true,TrainerFeature.ClassProgression);
             Label(profile.Controls,"Class marks",18,143,250,27,null);Number(profile.Controls,marks,281,140,125,0,1000000,1000,1,0.1m);
-            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));ProfileQueued("Class marks");},true,TrainerFeature.ClassProgression);
+            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(SelectedClass(),(int)(marks.Value*10));ProfileQueued("Class marks");},true,TrainerFeature.ClassMarks);
             Label(profile.Controls,"Permanent changes; backups are saved in trainer\\backups.\nRespec before lowering points. Reopen the Armory to refresh.\nMarks still require normal unlocks.",18,206,660,156,new Font("Segoe UI",9));
             Check(automation.Controls,autoSpell,"Auto-pick spell offers",18,21,290,false);
             spellRule.SetBounds(333,21,345,30);ComboStyle(spellRule);spellRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(spellRule);spellRule.SelectedIndex=4;
@@ -128,7 +134,7 @@ namespace AzerothTrainer
         }
         void Poll()
         {
-            if(busy||session==null)return;if(session.Exited){Detach();status.Text="Game closed. Trainer detached.";return;}
+            if(busy||session==null)return;if(session.Exited){Detach();status.Text="Game closed. Trainer detached.";return;}SyncClasses();
             if(talentPending!=0)
             {
                 int code=session.TalentResult(talentPending);if(code!=0){talentPending=0;status.Text=code==1?"Class talent points updated. Reopen the Armory to refresh.":(code==2?"Talent change refused: respec this class before lowering below its allocated points.":"Talent change failed: class record unavailable.");}
@@ -138,7 +144,14 @@ namespace AzerothTrainer
         void ResourceLimits()
         {
             resource.DecimalPlaces=resourceKind.SelectedIndex==3?1:0;resource.Maximum=resourceKind.SelectedIndex==0?100000:(resourceKind.SelectedIndex==1||resourceKind.SelectedIndex==2?9999:1000000);
-            resourceHelp.Text=resourceKind.SelectedIndex==4?"XP grants also use the enabled Run XP multiplier.":(resourceKind.SelectedIndex==3?"Shield can be reduced by the game's stat recalculation.":"Run actions need a live run. Stat minimums are in Run stats.");
+            resourceHelp.Text=resourceKind.SelectedIndex==4?"XP grants also use the enabled Run XP multiplier.":(resourceKind.SelectedIndex==3?"Shield can be reduced by the game's stat recalculation.":"Run actions need a live run. Stat minimums are in Run stats.");if(resourceAction!=null)UpdateButtons();
+        }
+        void SyncClasses()
+        {
+            if(!session.Supports(TrainerFeature.ClassProgression)&&!session.Supports(TrainerFeature.ClassMarks))return;int[] ids;try{ids=session.AvailableClasses;}catch{return;}if(ids.Length==0)return;
+            if(classKind.Items.Count==ids.Length){bool same=true;for(int i=0;i<ids.Length;i++){var item=classKind.Items[i] as LoadedClass;if(item==null||item.Id!=ids[i])same=false;}if(same)return;}
+            var selected=classKind.SelectedItem as LoadedClass;int previous=selected==null?-1:selected.Id;classKind.Items.Clear();
+            foreach(int id in ids)classKind.Items.Add(new LoadedClass{Id=id});classKind.SelectedIndex=0;for(int i=0;i<ids.Length;i++)if(ids[i]==previous)classKind.SelectedIndex=i;UpdateButtons();
         }
         void SetResource()
         {
@@ -160,17 +173,17 @@ namespace AzerothTrainer
             string gamePath=GameLocator.FindInstalled();
             while(!File.Exists(gamePath))
             {
-                using(var picker=new FolderBrowserDialog{Description="Choose the folder containing AzerothSurvivors.exe",ShowNewFolderButton=false})
+                using(var picker=new FolderBrowserDialog{Description="Choose the game's installation folder",ShowNewFolderButton=false})
                 {
                     if(picker.ShowDialog(this)!=DialogResult.OK){status.Text="Start the game yourself, or click Launch game to choose its folder.";return;}
-                    gamePath=Path.Combine(picker.SelectedPath,GameLocator.ExecutableName);
+                    gamePath=GameLocator.InDirectory(picker.SelectedPath);
                 }
                 if(!File.Exists(gamePath))MessageBox.Show(this,"AzerothSurvivors.exe was not found. Choose the game's installation folder.","Game folder",MessageBoxButtons.OK,MessageBoxIcon.Information);
             }
             using(Process p=Process.Start(new ProcessStartInfo(gamePath){WorkingDirectory=Path.GetDirectoryName(gamePath),UseShellExecute=true})){}
             GameLocator.Remember(gamePath);status.Text="Game started. Enable the trainer when ready.";
         }
-        void Detach(){if(session!=null){session.Dispose();session=null;}talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();}
+        void Detach(){if(session!=null){session.Dispose();session=null;}talentPending=marksPending=0;classKind.Items.Clear();classKind.Items.Add("Connect to load classes");classKind.SelectedIndex=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();}
         bool Available(TrainerFeature feature){return session==null||session.Supports(feature);}
         void FeatureSwitch(CheckBox box,Control input,TrainerFeature feature)
         {
@@ -181,13 +194,17 @@ namespace AzerothTrainer
         void ApplyCompatibility()
         {
             FeatureSwitch(spellOn,spell,TrainerFeature.SpellChance);FeatureSwitch(itemOn,item,TrainerFeature.ItemChance);FeatureSwitch(fixedCost,cost,TrainerFeature.RerollCost);
-            foreach(CheckBox box in new[]{unlimitedBan,unlimitedReroll,autoHeal})FeatureSwitch(box,null,TrainerFeature.RunControls);
-            FeatureSwitch(speedOn,speed,TrainerFeature.RunControls);FeatureSwitch(xpOn,xp,TrainerFeature.RunControls);
-            FeatureSwitch(autoSpell,spellRule,TrainerFeature.RunControls);FeatureSwitch(autoItem,itemRule,TrainerFeature.RunControls);
-            bool runAvailable=Available(TrainerFeature.RunControls);stats.Enabled=runAvailable;
-            if(!runAvailable)foreach(DataGridViewRow row in stats.Rows)row.Cells[0].Value=false;
-            foreach(Control control in new Control[]{resourceKind,resource,advance,pickDelay})control.Enabled=runAvailable;
-            foreach(Control control in new Control[]{classKind,talents,marks})control.Enabled=Available(TrainerFeature.ClassProgression);
+            FeatureSwitch(unlimitedBan,null,TrainerFeature.Banishes);FeatureSwitch(unlimitedReroll,null,TrainerFeature.FreeRerolls);FeatureSwitch(autoHeal,null,TrainerFeature.RunResources);
+            FeatureSwitch(speedOn,speed,TrainerFeature.RunControls);FeatureSwitch(xpOn,xp,TrainerFeature.XpScaling);
+            FeatureSwitch(autoSpell,spellRule,TrainerFeature.AutoPick);FeatureSwitch(autoItem,itemRule,TrainerFeature.AutoPick);
+            bool highest=session==null||session.HighestRaritySupported;
+            foreach(var box in new[]{spellRule,itemRule}){if(!highest&&box.Items.Count==5){if(box.SelectedIndex==4)box.SelectedIndex=0;box.Items.RemoveAt(4);}else if(highest&&box.Items.Count==4)box.Items.Add(AutoPickCode.Rules[4]);}
+            bool any=false;foreach(DataGridViewRow row in stats.Rows){bool available=Available(PatchSession.StatFeature(row.Index));any|=available;row.ReadOnly=!available;if(!available)row.Cells[0].Value=false;row.DefaultCellStyle.BackColor=available?Color.White:SystemColors.Control;}stats.Enabled=any;
+            TrainerFeature resourceFeature=resourceKind.SelectedIndex==0?TrainerFeature.Gold:resourceKind.SelectedIndex==1?TrainerFeature.Banishes:resourceKind.SelectedIndex==2?TrainerFeature.FreeRerolls:resourceKind.SelectedIndex==3?TrainerFeature.Shield:TrainerFeature.XpGrant;
+            if(resourceAction!=null)connectedFeatures[resourceAction]=resourceFeature;
+            resourceKind.Enabled=Available(TrainerFeature.Gold)||Available(TrainerFeature.FreeRerolls)||Available(TrainerFeature.Shield)||Available(TrainerFeature.Banishes)||Available(TrainerFeature.XpGrant);resource.Enabled=Available(resourceFeature);
+            advance.Enabled=Available(TrainerFeature.RunResources);pickDelay.Enabled=Available(TrainerFeature.AutoPick);
+            classKind.Enabled=Available(TrainerFeature.ClassProgression)||Available(TrainerFeature.ClassMarks);talents.Enabled=Available(TrainerFeature.ClassProgression);marks.Enabled=Available(TrainerFeature.ClassMarks);
             compatibility.Text=session!=null&&session.UnavailableFeatures.Length!=0?"Unavailable for this build: "+session.UnavailableFeatures:"";
             compatibilityTip.SetToolTip(compatibility,compatibility.Text);
         }
@@ -195,7 +212,7 @@ namespace AzerothTrainer
         {
             ApplyCompatibility();bool active=session!=null&&session.Connected;
             enable.Enabled=!active&&!busy;apply.Enabled=disable.Enabled=active&&!busy;
-            foreach(var entry in connectedFeatures)entry.Key.Enabled=active&&!busy&&Available(entry.Value);
+            foreach(var entry in connectedFeatures)entry.Key.Enabled=active&&!busy&&Available(entry.Value)&&((entry.Value!=TrainerFeature.ClassProgression&&entry.Value!=TrainerFeature.ClassMarks)||classKind.SelectedItem is LoadedClass);
         }
         void SetBusy(bool value){foreach(Control c in Controls)if(!(c is Label))c.Enabled=!value;UpdateButtons();}
         void ShowError(Exception ex){UpdateButtons();MessageBox.Show(this,ex.Message,"Trainer",MessageBoxButtons.OK,MessageBoxIcon.Information);}
@@ -209,7 +226,7 @@ namespace AzerothTrainer
         void Check(Control.ControlCollection c,CheckBox b,string text,int x,int y,int width,bool value){b.Text=text;b.SetBounds(x,y,width,29);b.Checked=value;c.Add(b);}
         void Label(Control.ControlCollection c,string text,int x,int y,int width,int height,Font font){var l=new Label{Text=text,Location=new Point(x,y),Size=new Size(width,height)};if(font!=null)l.Font=font;c.Add(l);}
         static void Configure(Button b,string text,int x,int y,int width){b.Text=text;b.SetBounds(x,y,width,36);b.FlatStyle=FlatStyle.Flat;b.BackColor=Color.FromArgb(43,48,59);}
-        void Button(Control.ControlCollection c,string text,int x,int y,int width,Action action,bool needsSession,TrainerFeature feature=TrainerFeature.RunControls)
-        {var b=new Button();Configure(b,text,x,y,width);b.Click+=delegate{try{action();}catch(Exception ex){status.Text="Action failed: "+ex.Message;ShowError(ex);}};c.Add(b);if(needsSession)connectedFeatures.Add(b,feature);}
+        Button Button(Control.ControlCollection c,string text,int x,int y,int width,Action action,bool needsSession,TrainerFeature feature=TrainerFeature.RunControls)
+        {var b=new Button();Configure(b,text,x,y,width);b.Click+=delegate{try{action();}catch(Exception ex){status.Text="Action failed: "+ex.Message;ShowError(ex);}};c.Add(b);if(needsSession)connectedFeatures.Add(b,feature);return b;}
     }
 }

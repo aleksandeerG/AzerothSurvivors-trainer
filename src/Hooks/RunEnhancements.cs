@@ -42,6 +42,7 @@ namespace AzerothTrainer
         {
             for(int i=0;i<All.Length;i++)
             {
+                if(!layout.Supports(All[i].Field==0x628?TrainerFeature.Lives:TrainerFeature.Stats))continue;
                 var stat=All[i];int at=DataOffset+i*Stride;string done="stat"+i;
                 // Each value and enabled flag is published as one aligned word.
                 a.Emit("83 B8");a.Bytes.AddRange(BitConverter.GetBytes(at+4));a.Emit("00");a.Branch("0F 84",done); // cmp dword [rax+enabled],0
@@ -63,28 +64,37 @@ namespace AzerothTrainer
     }
     internal static class AutoPickCode
     {
-        internal const int SpellMode=56,ItemMode=60,Owner=64,Offer=72,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92;
+        internal const int SpellMode=56,ItemMode=60,Owner=64,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92,Fingerprint=384;
         internal static readonly string[] Rules={"Left card","Middle card","Right card","Random card","Highest rarity (leftmost tie)"};
         internal static void Emit(Assembler a,IntPtr start,IntPtr image,GameLayout layout)
         {
             a.Emit("80 BE $phase 02");a.Branch("0F 85","autoReset");
-            a.Emit("80 BE $coop 00");a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase 01");a.Branch("0F 85","autoReset");a.Label("autoLive");
+            a.Emit("80 BE $coop 00");
+            if(layout.Supports(TrainerFeature.CoopAutoPick)){a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase 01");a.Branch("0F 85","autoReset");a.Label("autoLive");}
+            else a.Branch("0F 85","autoReset");
             a.Emit("83 BE $hp 00");a.Branch("0F 8E","autoReset");
             a.Emit("0F B6 96 $offerKind 83 FA 02");a.Branch("0F 87","autoReset");
             a.Emit("44 8B 40 38 85 D2");a.Branch("0F 84","autoMode");a.Emit("44 8B 40 3C");
             a.Label("autoMode");a.Emit("45 85 C0");a.Branch("0F 84","autoReset");
             a.Emit("4C 8B 9E $offerCount 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset"); // mov r11,offer count; require 1..3
             a.Emit("4C 8B 8E $offers 4D 85 C9");a.Branch("0F 84","autoReset"); // mov r9,offer vector; test r9,r9
+            // Detect a changed hand without depending on a UI-only counter.
+            a.Emit("4D 89 CA 44 89 D9 69 C9");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferStride));a.Emit("C1 E9 03 31 D2");
+            a.Label("autoHash");a.Emit("48 C1 C2 07 49 33 12 49 83 C2 08 FF C9");a.Branch("0F 85","autoHash");a.Emit("4C 31 CA 4C 31 DA");
             a.Emit("48 39 70 40");a.Branch("0F 85","autoOffer");
-            a.Emit("8B 96 $offerNumber 3B 50 48");a.Branch("0F 84","autoWait");
-            a.Label("autoOffer");a.Emit("48 89 70 40 8B 96 $offerNumber 89 50 48 C7 40 4C 00 00 00 00");
+            a.Emit("48 39 90 80 01 00 00");a.Branch("0F 84","autoWait");
+            a.Label("autoOffer");a.Emit("48 89 70 40 48 89 90 80 01 00 00 C7 40 4C 00 00 00 00");
             a.Label("autoWait");a.Emit("F3 0F 10 44 24 78 0F 57 D2 F3 0F 5F C2 F3 0F 5D 40 5C F3 0F 58 40 4C F3 0F 11 40 4C 0F 2E 40 50");a.Branch("0F 82","autoDone"); // clamp real dt, accumulate elapsed, ucomiss against delay
             a.Emit("C7 40 4C 00 00 00 00 41 83 F8 05");a.Branch("0F 84","autoHighest");a.Emit("41 83 F8 04");a.Branch("0F 84","autoRandom");
             a.Emit("41 8D 50 FF 41 8D 4B FF 39 CA 0F 47 D1");a.Branch("E9","autoChoose"); // EDX=min(mode-1,count-1), using lea/cmp/cmova
             a.Label("autoRandom");a.Emit("44 69 50 54 0D 66 19 00 41 81 C2 5F F3 6E 3C 44 89 50 54 44 89 D0 31 D2 41 F7 F3");a.Branch("E9","autoChoose"); // LCG state = state*1664525+1013904223; EDX=remainder after div count
-            a.Label("autoHighest");a.Emit("31 C9 31 D2 45 8B 91 98 00 00 00");
-            a.Label("autoScan");a.Emit("41 8B 81 98 00 00 00 44 39 D0");a.Branch("0F 86","autoNext");a.Emit("41 89 C2 89 CA");
-            a.Label("autoNext");a.Emit("49 81 C1 A0 00 00 00 FF C1 44 39 D9");a.Branch("0F 82","autoScan");
+            a.Label("autoHighest");a.Emit("31 C9 31 D2");
+            if(layout.OfferRarity>0)
+            {
+                a.Emit("45 8B 91");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferRarity));
+                a.Label("autoScan");a.Emit("41 8B 81");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferRarity));a.Emit("44 39 D0");a.Branch("0F 86","autoNext");a.Emit("41 89 C2 89 CA");
+                a.Label("autoNext");a.Emit("49 81 C1");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferStride));a.Emit("FF C1 44 39 D9");a.Branch("0F 82","autoScan");
+            }
             a.Label("autoChoose");a.Emit("48 89 F1");FrameCode.Call(a,Native.Add(image,layout.Rva("Choose"))); // RCX=Game, EDX=card index; call normal choice handler
             FrameCode.Pointer(a,Native.Add(start,4096));a.Emit("FF 40 58");a.Branch("E9","autoDone");
             a.Label("autoReset");a.Emit("C7 40 4C 00 00 00 00 48 C7 40 40 00 00 00 00");

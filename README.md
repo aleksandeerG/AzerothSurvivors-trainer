@@ -9,11 +9,13 @@ Control legendary chances, reroll prices, run speed, XP, resources, automatic of
 ## Requirements
 
 - 64-bit Windows with .NET Framework 4.5 or newer (4.8 recommended).
-- A desktop game whose functions match the verified instruction contracts. Both reference builds below are supported; compatible updates can move code and memory regions or combine known function variants.
+- A desktop game whose runtime code matches the decoded operation patterns. Both reference builds below are supported; permanent edits also require verified save helpers.
 - The supported game installed anywhere on your PC. The trainer can run from any folder.
 - The trainer and game running as the same Windows user with matching administrator privileges.
 
-Building uses Windows PowerShell and the 64-bit C# compiler shipped with .NET Framework. No Visual Studio, .NET SDK, NuGet packages, Python, or Cheat Engine is required. Game files are not included in this repository.
+Building uses Windows PowerShell and the 64-bit C# compiler shipped with .NET Framework. The first build downloads Iced 1.21.0 from NuGet and verifies its pinned SHA-256. Later builds use the ignored `.local/dependencies` cache. No Visual Studio, .NET SDK, NuGet CLI, Python, or Cheat Engine is required. Game files are not included.
+
+The decoder and its MIT license are embedded in the resulting executable. The trainer stays a single portable file and needs no package downloads at runtime. Decoder source and license: [icedland/iced](https://github.com/icedland/iced).
 
 ## Get the source and build
 
@@ -27,7 +29,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 
 The script produces **`build\Azeroth Trainer Plus.exe` inside the repository**. Source and output paths are resolved relative to the script, so the build also works when invoked from another directory. Build output is ignored by Git.
 
-Run `build\Azeroth Trainer Plus.exe` directly, or move it to any writable folder. The trainer detects a running game automatically. **Launch game** uses the game beside the trainer or a remembered location; if neither exists, it opens a folder picker. Your selected or detected location is remembered in `%LOCALAPPDATA%\AzerothSurvivorsTrainer\game-path.txt`.
+Run `build\Azeroth Trainer Plus.exe` directly, or move it to any writable folder. The trainer detects a running game automatically. **Launch game** uses a remembered location or the adjacent game; otherwise it opens a folder picker. Renamed executables can be identified from their game marker, window title, or remembered path. Your selected or detected location is remembered in `%LOCALAPPDATA%\AzerothSurvivorsTrainer\game-path.txt`.
 
 Optionally, copy the executable beside the game during the build. For a repository inside the game directory, run:
 
@@ -110,19 +112,19 @@ Enable any of 20 stat minimums and click **Apply options**. Stronger bonuses sta
 
 ## Talents and marks
 
-Select a class, then set earned points (0-51) or marks. Changes are permanent, with backups in `trainer/backups`. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory. Disable and Close warn about pending edits, which may be cancelled. Normal unlock requirements apply.
+Connect and select a class from the loaded profile. Open its Armory or play it once if it is missing. Set earned points (0-51) or marks; a verified backup is required. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory. Pending edits warn on Disable/Close. Normal unlocks apply.
 
 ## Compatibility and lifecycle
 
-The trainer discovers functions through the executable's runtime-function table and complete instruction contracts. A fully supported build validates 18 function bodies, their stack-unwind information, required callback relationships, 17 patch sites, and two guards. Before enabling, matched live function bodies must agree with the validated file, allowing for Windows ASLR relocations.
+Runtime hooks use decoded x64 operations, control flow, string references and call relationships. The run update is anchored by its `WOW_ROGUE_SINK_AT` reference. Rarity decision trees, XP award entry, health recalculation, offer handler and price calculations are recognized independently. Whole-function fingerprints are reserved for the permanent-edit helpers `EnsureClass`, `SaveProfile` and the marks-vector allocator.
 
-Memory locations are extracted from reviewed instruction operands. Ten independently located regions cover health/resources/stats, offers, the clock, offer counters, run states, and progression. References within each region must preserve their verified member spacing; references across functions must agree. Alignment, size limits, and overlapping regions are checked before dependent hooks become available. Generated hooks use these discovered locations, including all 20 stat minimums and profile edits.
+Fields and rarity/health registers are extracted from instructions. Witnesses must agree, stay aligned, and avoid overlap. The stat record must retain its verified member layout. Gold, free rerolls, shield, run states and offer vectors have separate evidence. Auto-pick identifies a changed hand from its card records, without depending on a UI-only offer counter. Marks require a small labeled serialization loop that proves the vector and eight-byte record format; unrelated serializer code can change.
 
-Compatibility is checked independently for five groups: **spell chance**, **item chance**, **reroll cost**, **run controls/stats/auto-pick**, and **class progression**. If an update breaks one group, verified groups can still work. Run options stay together because their shared hook requires a complete set of validated functions and memory regions. A missing function can also remove the only witness for a field used by another group.
+Compatibility is checked for **18 independent capabilities**: spell/item chances, paid pricing, speed, XP scaling, healing/clock, gold, free rerolls, shield, banishes, stat minimums, max-HP floor, remaining lives, solo/co-op auto-pick, XP grants, class talents and class marks. The shared run and profile hooks emit only supported operations. Losing a price or co-op handler does not discard unrelated run controls. The UI disables unsupported switches, individual stat rows and resource actions.
 
-Each function can match either reference variant independently. Known variants can coexist when their operands agree and their required calls lead to the selected helpers. Each hook keeps the patch boundaries, live registers, and stack contract of its own matched variant. Equivalent matches at the same address are deduplicated; competing addresses or conflicting hook contracts disable the dependent group.
+Load checks prove instruction boundaries, reachable branch entries, scratch-register liveness and agreement between prologue instructions and unwind metadata. Required links include Run → XP and Choose → Health when those roles are available. Equivalent marks allocators are accepted by verified body and call targets, without depending on neighboring functions. Ambiguous contexts refuse their dependent capabilities.
 
-Connect normally. Unsupported options are cleared and disabled, with a persistent notice naming unavailable groups. Detailed reasons are written by the compatibility commands below. Ambiguous functions disable their dependent groups. If no group is verified, connecting is refused.
+Before connecting, recognized live function bodies must agree with the checked executable, including ASLR relocations. A live mismatch disables its dependent capabilities. If none remain, connecting is refused. Diagnostics identify failed roles, field witnesses, register liveness, frame mismatches and call links. There is no force-enable option.
 
 SHA-256 identifies the executable in diagnostics; it is **not a version whitelist**. These are the verified reference builds:
 
@@ -131,9 +133,9 @@ SHA-256 identifies the executable in diagnostics; it is **not a version whitelis
 | Original desktop layout | `0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908` |
 | Updated desktop layout | `6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa` |
 
-This supports compatible code relocation, independent memory-region movement, combinations of known function variants, and partial updates. Matching normalizes four-byte PC-relative addresses and reviewed memory displacements. Instructions, registers, member spacing, record formats, internal branches, and stack layouts remain exact. Changes to those contracts still need a verified trainer update. Arbitrary register allocation, instruction reordering, new game logic, or a different engine/architecture are not automatically supported. No release can guarantee compatibility with every future version; there is no force-enable option.
+Runtime recognition tolerates unrelated function changes and extracts the registers/fields used by the supported patterns. It still requires recognizable operations, call conventions and record formats. Reworked logic, heavy inlining, unsupported instruction shapes or another architecture can require a trainer update. Permanent-save helpers deliberately stay strict; an unknown helper disables the affected edit.
 
-Local verification covers both reference executables, copies with all ten regions moved independently and together, and a copy combining original and updated function contracts. Native hook checks exercise those layouts in isolated memory. These synthetic copies demonstrate supported change classes; they do not establish compatibility with an untested future release. Verification fixtures and tools stay outside the tracked repository.
+Local checks cover both real builds, cross-catalog recognition in both directions, unrelated-code mutations, lost dependencies, redirected calls, bad unwind metadata, simulated live mismatches, poisoned RNG registers, backup refusal and native hook behavior. These recognizers were developed with both builds available. Cross-build and synthetic checks do not prove support for an unseen future release; genuine prediction must be measured on a new build before changing the recognizers. Verification files remain ignored.
 
 Run the trainer and game as the same Windows user with matching administrator privileges. Joining co-op clients cannot control the host's simulation. If the trainer is forcibly terminated while enabled, restart the game to remove its hooks.
 
@@ -141,7 +143,7 @@ Compatibility checking and initial option application run off the UI thread. Dat
 
 Thread snapshots repeat until a pass finds no new threads. A 16-pass limit releases captured threads and refuses the operation if they do not settle. An external process can still create a thread after the final snapshot.
 
-Generated hooks have registered Windows unwind information. They reuse the original frame and avoid extra pushes. Entry and continuation jumps are tested to avoid false Windows epilogue detection. Registered code pages are retained until the game exits so stack walks cannot refer to freed metadata; Disable/Enable within the same window reuses those small allocations. The game's executable and MPQs stay unchanged on disk. Permanent progression buttons intentionally invoke the game's own save routine.
+Generated hooks use private scratch frames and preserve volatile registers instead of borrowing game locals or exception-state slots. Continuation jumps use a register proven dead at the destination. Windows unwind tables describe the private allocation and the original frame, including restore/tail transitions. Code pages stay registered until the game exits; Disable/Enable reuses them. The executable and MPQs stay unchanged on disk. Permanent edits invoke the native save routine.
 
 ## Compatibility diagnostics
 
@@ -152,7 +154,7 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-files` works with the game closed. It checks instruction contracts, required call relationships, unwind data, discovered memory regions, and hook contexts. Its report lists each group's availability, reasons for unavailable groups, field witnesses, selected function variants and addresses, and the executable hash. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
+`--verify-files` works with the game closed. It checks decoded patterns, call relationships, frame safety and fields. Its report lists capability availability, reasons, witnesses and executable hash. It does not launch the game or install hooks. Pass a game directory or executable explicitly when needed, including a renamed executable: `--verify-files "F:\Games\Azeroth Survivors"`.
 
 To inspect an already running game, close other trainers normally and run:
 
@@ -161,15 +163,15 @@ Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-game' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-game` resolves the layout and compares matched live function bodies against the validated file, including ASLR adjustments, without installing hooks. An already enabled trainer changes those bodies, so disable it first. Reports say **PASS** when all groups are available, **PARTIAL** when some verified groups remain, or **FAIL** when connecting is unsafe. Exit code 0 means at least one verified group is usable; 1 means failure. Each command overwrites `trainer/game-check.txt`. The UI performs the same checks when connecting.
+`--verify-game` checks the running game without installing hooks. Disable other trainers first. Reports say **PASS** when every capability is available, **PARTIAL** when some remain, or **FAIL** when connecting is unsafe. Exit code 0 means a usable capability remains; 1 means verification failed; 2 means no report could be written. Reports normally use `trainer/game-check.txt`. If that folder is unwritable, they fall back to `%LOCALAPPDATA%/AzerothSurvivorsTrainer/reports`, then `%TEMP%/AzerothSurvivorsTrainer`; the path is printed to standard output. The UI performs the same checks on connection.
 
 Compatibility checks do not establish that every option works throughout a complete run. Full live auto-pick behavior, actual profile serialization, and Armory refresh have not been verified end to end. Use the status messages and check the game's displayed values after a request.
 
 ## Profile backups and persistence
 
-Before each permanent class edit, the trainer copies `%APPDATA%\wenilla-rogue\characters.txt`, if present, into `trainer\backups` beside the trainer executable. Copies have unique names. Keep backups you may need; rebuilding does not remove them.
+Before each permanent edit, the trainer reads the running game's environment and working directory. `WOW_ROGUE_SAVE` overrides the save directory; a relative value is resolved against the game's working directory. Otherwise it uses that process's `%APPDATA%/wenilla-rogue`. The `characters.txt` file is copied to a uniquely named file in `trainer/backups`, flushed and verified byte-for-byte before a request is queued.
 
-To restore a backup, close the game and trainer, preserve another copy of your current profile, and copy the chosen backup over the original profile file. Other profiles are not backed up by this mechanism. A missing source profile produces no backup. Ensure the trainer's directory is writable before editing progression.
+Missing/unreadable saves, unresolved paths, unwritable backups or changing backup contents refuse the edit. Class IDs come from loaded talent/marks records; unknown future IDs are shown numerically. To restore, close the game and trainer, preserve the current save, and copy the chosen backup over the effective `characters.txt`. Other save files are not backed up. Rebuilding preserves backups.
 
 Disable restores executable instructions. It does not undo granted XP, resources, talent/marks edits, elapsed time, chosen offers, or saved progression. Unlimited counters and enforced stats can remain at their current values until normal gameplay consumes or recalculates them.
 
@@ -200,9 +202,12 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | `src/Program.cs` | Windows Forms entry point and compatibility command dispatch |
 | `src/Game/GameLocator.cs` | Running-game discovery and remembered installation location |
 | `src/Game/GameImage.cs` | PE sections, runtime-function ranges, executable hashing, and ASLR relocation parsing |
-| `src/Game/GameLayout.cs` | Independent function-variant selection, feature dependencies, callback checks, and live validation |
-| `src/Game/MemoryContracts.cs` | Operand extraction, region agreement/alignment/bounds checks, and discovered field access |
-| `src/Game/BuildCatalog.cs` | Verified instruction and memory-operand contracts, hook boundaries, and reference variants |
+| `src/Game/GameLayout.cs` | Independent capabilities, field agreement/bounds, call checks and live validation |
+| `src/Game/RuntimeDiscovery.cs` | Runtime operation recognizers, string/call anchors, fields and registers |
+| `src/Game/DecodedCode.cs` | Iced decoding, control flow, liveness and prologue/unwind proofs |
+| `src/Game/CatalogContracts.cs` | Strict helper fingerprints and decoded patch boundaries |
+| `src/Game/BuildCatalog.cs` | Verified permanent-edit helper signatures |
+| `src/Game/ProfileBackup.cs` | Target-process environment/path resolution and verified backups |
 | `src/UI/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
 | `src/Hooks/HookEngine.cs` | Layout-aware instruction assembly, patch lifecycle, session management, resources, and profile backups |
 | `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |
