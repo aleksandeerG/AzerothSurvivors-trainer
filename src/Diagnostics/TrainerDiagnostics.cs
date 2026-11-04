@@ -12,9 +12,8 @@ namespace AzerothTrainer
             Directory.CreateDirectory(folder);
             return Path.Combine(folder,"game-check.txt");
         }
-        static void CheckFiles()
+        static void CheckFiles(string path)
         {
-            string path=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"AzerothSurvivors.exe");
             using(var file=File.OpenRead(path))
             {
                 using(var sha=SHA256.Create())Require(BitConverter.ToString(sha.ComputeHash(file)).Replace("-","").ToLowerInvariant()==RarityCode.SupportedHash,"Unsupported executable hash");
@@ -25,17 +24,19 @@ namespace AzerothTrainer
                 for(int i=0;i<sites.Length;i++)
                 {file.Position=sites[i]-0xc00;byte[] actual=new byte[expected[i].Length];Require(file.Read(actual,0,actual.Length)==actual.Length&&Native.Equal(actual,expected[i]),"Disk instruction mismatch at "+sites[i].ToString("X"));}
             }
-            foreach(int site in new int[]{RarityCode.HookRva,0x5f74c3e,0x5f74cff,RunCode.HookRva,XpCode.HookRva,ProfileCode.HookRva})UnwindSupport.FrameFor(site);
+            foreach(int site in new int[]{RarityCode.HookRva,0x5f74c3e,0x5f74cff,RunCode.HookRva,XpCode.HookRva,ProfileCode.HookRva})UnwindSupport.FrameFor(site,path);
         }
-        internal static int VerifyFiles()
+        internal static int VerifyFiles(string gameDirectory)
         {
             string report=ReportPath();
             try
             {
-                CheckFiles();File.WriteAllText(report,"Checked UTC: "+DateTime.UtcNow.ToString("u")+Environment.NewLine+
+                string path=String.IsNullOrEmpty(gameDirectory)?GameLocator.FindExecutable():Path.Combine(gameDirectory,GameLocator.ExecutableName);
+                if(path==null)throw new Exception("Game not found. Use Launch game to choose its folder, or pass the game directory after --verify-files.");
+                CheckFiles(path);File.WriteAllText(report,"Checked UTC: "+DateTime.UtcNow.ToString("u")+Environment.NewLine+
                     "PASS (disk): supported executable SHA-256 "+RarityCode.SupportedHash+Environment.NewLine+
                     "PASS (disk): all 16 patch sites, unchanged HUD/co-op guards (18 compatibility sites), and six original unwind frames."+Environment.NewLine+
-                    "LIVE CHECK: NOT RUN. File verification does not inspect a game process. Use --verify-game separately when the game is running and older trainers are closed."+Environment.NewLine+
+                    "LIVE HOOK CHECK: NOT RUN. File verification checks on-disk bytes only. Use --verify-game to inspect a running game's hook sites."+Environment.NewLine+
                     "No game process was launched and no game/profile files or memory were changed.");return 0;
             }
             catch(Exception ex){File.WriteAllText(report,"FAIL (disk): "+ex.Message);return 1;}
@@ -45,8 +46,7 @@ namespace AzerothTrainer
             string report=ReportPath();
             try
             {
-                string path=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"AzerothSurvivors.exe");
-                using(var s=PatchSession.Attach(path))
+                using(var s=PatchSession.Attach())
                     File.WriteAllText(report,"PASS (live): game hash, process access, ASLR base, all six gameplay hooks, unchanged HUD/co-op guards and all five pricing paths verified. No memory changed.");
                 return 0;
             }

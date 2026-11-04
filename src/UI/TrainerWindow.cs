@@ -16,7 +16,6 @@ namespace AzerothTrainer
         readonly Label status=new Label();readonly Timer timer=new Timer();
         readonly Button enable=new Button(),apply=new Button(),disable=new Button();
         readonly List<Control> connectedControls=new List<Control>();
-        readonly string gamePath=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"AzerothSurvivors.exe");
         readonly int[] classIds={1,2,3,4,5,7,8,9,11};
         PatchSession session;bool busy;uint talentPending,marksPending;
         internal TrainerWindow()
@@ -28,33 +27,33 @@ namespace AzerothTrainer
             var rarity=Tab(tabs,"Rarity and rolls");var run=Tab(tabs,"Run and time");var profile=Tab(tabs,"Talents and marks");var automation=Tab(tabs,"Auto-pick");var statTab=Tab(tabs,"Run stats");
             Check(rarity.Controls,spellOn,"Override spell legendary chance",18,18,480,false);Number(rarity.Controls,spell,538,18,120,0,100,50,1,0.1m);Label(rarity.Controls,"%",665,21,20,25,null);
             Check(rarity.Controls,itemOn,"Override in-run item legendary chance",18,66,480,false);Number(rarity.Controls,item,538,66,120,0,100,50,1,0.1m);Label(rarity.Controls,"%",665,69,20,25,null);
-            Label(rarity.Controls,"Separate chances per offered card. Item chance covers rings, trinkets and amulets.",18,113,660,42,null);
+            Label(rarity.Controls,"Chance per card. Items: rings, trinkets and amulets.",18,113,660,42,null);
             Check(rarity.Controls,fixedCost,"Fixed paid reroll cost (0 = free)",18,172,480,false);Number(rarity.Controls,cost,538,172,120,0,100000,100,0,1);
             Check(rarity.Controls,unlimitedBan,"Unlimited banishes",18,227,330,false);Check(rarity.Controls,unlimitedReroll,"Unlimited free rerolls",365,227,330,false);
-            Label(rarity.Controls,"Changes affect future offers. Permanent equipment in the main menu uses a separate system.\nAfter changing an option, click Apply options.",18,293,660,70,null);
+            Label(rarity.Controls,"Affects future run offers. Click Apply options after changes.",18,293,660,70,null);
             Check(run.Controls,speedOn,"Simulation speed",18,15,220,false);Number(run.Controls,speed,235,15,115,0,10,1,1,0.1m);Label(run.Controls,"x  (0 freezes time; 1 is normal)",365,19,320,28,null);
             Check(run.Controls,xpOn,"Run XP multiplier",18,60,220,false);Number(run.Controls,xp,235,60,115,0.1m,100,1,1,0.1m);
             Check(run.Controls,autoHeal,"Auto-heal while alive",388,60,300,false);
-            Label(run.Controls,"Character stat minimums are in the Run stats tab. Every option starts off.",18,115,660,50,null);
+            Label(run.Controls,"Changes apply during a run. Stat minimums are in Run stats.",18,115,660,50,null);
             Label(run.Controls,"Run resource",18,202,180,24,null);resourceKind.SetBounds(18,231,220,30);ComboStyle(resourceKind);
             resourceKind.Items.AddRange(new object[]{"Gold (set)","Banishes (set)","Free rerolls (set)","Shield (set)","Run XP (grant)"});run.Controls.Add(resourceKind);
             Number(run.Controls,resource,252,231,135,0,100000,1000,0,1);resourceKind.SelectedIndexChanged+=delegate{ResourceLimits();};resourceKind.SelectedIndex=0;
             Button(run.Controls,"Set / grant",407,228,130,SetResource,true);Button(run.Controls,"Heal now",551,228,130,delegate{session.Heal();Queued("Healing");},true);
             Number(run.Controls,advance,18,293,150,0,3600,60,0,1);Button(run.Controls,"Advance clock (seconds)",184,290,235,delegate{session.Advance((float)advance.Value);Queued("Clock advance");},true);
-            Label(run.Controls,"Higher speed makes each step longer and can skip projectile or movement collisions. Clock advances bring spawns forward; bosses still need to die.",18,341,660,45,new Font("Segoe UI",9));
+            Label(run.Controls,"High speeds can skip collisions. Clock advances bring spawns forward.",18,341,660,45,new Font("Segoe UI",9));
             Label(profile.Controls,"Class to edit",18,21,210,27,null);classKind.SetBounds(235,19,280,30);ComboStyle(classKind);
             classKind.Items.AddRange(new object[]{"Warrior","Paladin","Hunter","Rogue","Priest","Shaman","Mage","Warlock","Druid"});classKind.SelectedIndex=0;profile.Controls.Add(classKind);
             Label(profile.Controls,"Earned talent points",18,83,250,27,null);Number(profile.Controls,talents,281,80,125,0,51,51,0,1);
             Button(profile.Controls,"Set talent points",430,77,250,delegate{talentPending=session.SetTalentPoints(classIds[classKind.SelectedIndex],(int)talents.Value);Queued("Class talent points");},true);
             Label(profile.Controls,"Class marks",18,143,250,27,null);Number(profile.Controls,marks,281,140,125,0,1000000,1000,1,0.1m);
             Button(profile.Controls,"Set marks",430,137,250,delegate{marksPending=session.SetMarks(classIds[classKind.SelectedIndex],(int)(marks.Value*10));Queued("Class marks");},true);
-            Label(profile.Controls,"These are permanent class changes. A copy of characters.txt is saved in trainer\\backups before each request.\n\nLowering earned points below the allocated ranks is refused. Respec in the Armory first. Close and reopen the Armory to refresh its view; run talents are chosen between runs.\n\nMarks do not remove the game's zone and Heroic unlock requirements.",18,206,660,156,new Font("Segoe UI",9));
+            Label(profile.Controls,"Permanent changes; backups are saved in trainer\\backups.\nRespec before lowering points. Reopen the Armory to refresh.\nMarks still require normal unlocks.",18,206,660,156,new Font("Segoe UI",9));
             Check(automation.Controls,autoSpell,"Auto-pick spell offers",18,21,290,false);
             spellRule.SetBounds(333,21,345,30);ComboStyle(spellRule);spellRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(spellRule);spellRule.SelectedIndex=4;
             Check(automation.Controls,autoItem,"Auto-pick in-run item offers",18,78,310,false);
             itemRule.SetBounds(333,78,345,30);ComboStyle(itemRule);itemRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(itemRule);itemRule.SelectedIndex=4;
             Label(automation.Controls,"Wait before each automatic pick",18,147,340,28,null);Number(automation.Controls,pickDelay,398,144,130,0,10,0.5m,1,0.1m);Label(automation.Controls,"seconds",543,147,130,28,null);
-            Label(automation.Controls,"Choose left, middle, right, random, or highest rarity. Highest rarity breaks ties by choosing the leftmost card. With fewer cards, a missing position uses the last available card.\n\nSpells and item offers can be automated independently. Each pick goes through the game's normal choice handler. This spends the offer and can learn a new spell or replace an item.\n\nThe delay uses normal frame time, independently of simulation speed. Click Apply options after changing these settings.",18,208,660,163,new Font("Segoe UI",9));
+            Label(automation.Controls,"Picks can learn spells or replace gear. Ties choose the leftmost card.\nMissing slots use the last card. Delay uses real time.\nClick Apply options after changes.",18,208,660,163,new Font("Segoe UI",9));
             BuildStats(statTab);
             BindSwitch(spellOn,spell);BindSwitch(itemOn,item);BindSwitch(fixedCost,cost);BindSwitch(speedOn,speed);BindSwitch(xpOn,xp);BindSwitch(autoSpell,spellRule);BindSwitch(autoItem,itemRule);
             Button(Controls,"Launch game",20,497,160,LaunchGame,false);
@@ -90,7 +89,7 @@ namespace AzerothTrainer
             try
             {
                 if(session!=null&&session.Exited){session.Dispose();session=null;}
-                if(session==null)session=await Task.Run(delegate{return PatchSession.Attach(gamePath);});
+                if(session==null)session=await Task.Run(delegate{return PatchSession.Attach();});
                 await Task.Run(delegate{session.Apply(options);});status.ForeColor=Color.FromArgb(255,192,90);status.Text=ActiveSummary(options);
             }
             catch(Exception ex){status.ForeColor=Color.LightCoral;status.Text=FailureStatus(session!=null&&session.Enabled);ShowError(ex);}
@@ -105,7 +104,7 @@ namespace AzerothTrainer
         }
         void BuildStats(TabPage tab)
         {
-            Label(tab.Controls,"Check a stat to enforce its minimum during a run. Stronger normal bonuses are kept.",18,12,670,40,new Font("Segoe UI",9));
+            Label(tab.Controls,"Set minimums, check the rows, then Apply options. Stronger bonuses stay.",18,12,670,40,new Font("Segoe UI",9));
             stats.SetBounds(18,56,678,270);stats.AllowUserToAddRows=false;stats.AllowUserToDeleteRows=false;stats.AllowUserToResizeRows=false;stats.RowHeadersVisible=false;stats.AutoGenerateColumns=false;
             stats.BackgroundColor=Color.FromArgb(30,34,43);stats.DefaultCellStyle.BackColor=Color.White;stats.DefaultCellStyle.ForeColor=Color.Black;stats.DefaultCellStyle.SelectionBackColor=Color.FromArgb(200,220,240);stats.DefaultCellStyle.SelectionForeColor=Color.Black;
             stats.Columns.Add(new DataGridViewCheckBoxColumn{HeaderText="On",Width=45});stats.Columns.Add(new DataGridViewTextBoxColumn{HeaderText="Stat",Width=255,ReadOnly=true});stats.Columns.Add(new DataGridViewTextBoxColumn{HeaderText="Minimum",Width=130});stats.Columns.Add(new DataGridViewTextBoxColumn{HeaderText="Unit",Width=210,ReadOnly=true});
@@ -117,7 +116,7 @@ namespace AzerothTrainer
                 catch{e.Cancel=true;stats.Rows[e.RowIndex].ErrorText="Enter "+stat.Min+" to "+stat.Max+(stat.Kind>=4?", whole numbers only.":".");}
             };
             tab.Controls.Add(stats);
-            Label(tab.Controls,"Health means maximum HP; use Heal now to refill it. Lives are replenished to the minimum. DoT stacks are capped at 4 by the game. Lifesteal and thorns are derived from effects and are not exposed here. Disable stops enforcing minimums; values can remain until the game recalculates them.",18,337,665,55,new Font("Segoe UI",8));
+            Label(tab.Controls,"Health sets max HP; Heal now refills it. DoT stacks: 1-4.\nDisable stops enforcement; existing stats may remain.",18,337,665,55,new Font("Segoe UI",9));
         }
         static void BindSwitch(CheckBox box,Control input){input.Enabled=box.Checked;box.CheckedChanged+=delegate{input.Enabled=box.Checked;};}
         static void ComboStyle(ComboBox box)
@@ -142,8 +141,22 @@ namespace AzerothTrainer
         void Queued(string what){status.Text=what+" queued for the next run update.";}
         void LaunchGame()
         {
-            Process[] running=Process.GetProcessesByName("AzerothSurvivors");try{if(running.Length>0){status.Text="Game is running. Enable the trainer when ready.";return;}}finally{foreach(Process p in running)p.Dispose();}
-            using(Process p=Process.Start(new ProcessStartInfo(gamePath){WorkingDirectory=Path.GetDirectoryName(gamePath)})){}status.Text="Game started. Enable the trainer when ready.";
+            using(Process running=GameLocator.FindRunning())
+            {
+                if(running!=null){GameLocator.Remember(running.MainModule.FileName);status.Text="Game is running. Enable the trainer when ready.";return;}
+            }
+            string gamePath=GameLocator.FindInstalled();
+            while(!File.Exists(gamePath))
+            {
+                using(var picker=new FolderBrowserDialog{Description="Choose the folder containing AzerothSurvivors.exe",ShowNewFolderButton=false})
+                {
+                    if(picker.ShowDialog(this)!=DialogResult.OK){status.Text="Start the game yourself, or click Launch game to choose its folder.";return;}
+                    gamePath=Path.Combine(picker.SelectedPath,GameLocator.ExecutableName);
+                }
+                if(!File.Exists(gamePath))MessageBox.Show(this,"AzerothSurvivors.exe was not found. Choose the game's installation folder.","Game folder",MessageBoxButtons.OK,MessageBoxIcon.Information);
+            }
+            using(Process p=Process.Start(new ProcessStartInfo(gamePath){WorkingDirectory=Path.GetDirectoryName(gamePath),UseShellExecute=true})){}
+            GameLocator.Remember(gamePath);status.Text="Game started. Enable the trainer when ready.";
         }
         void Detach(){if(session!=null){session.Dispose();session=null;}talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();}
         void UpdateButtons(){bool active=session!=null&&session.Enabled;enable.Enabled=!active&&!busy;apply.Enabled=disable.Enabled=active&&!busy;foreach(Control c in connectedControls)c.Enabled=active&&!busy;}

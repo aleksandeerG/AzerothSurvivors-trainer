@@ -10,7 +10,7 @@ Control legendary chances, reroll prices, run speed, XP, resources, automatic of
 
 - 64-bit Windows with .NET Framework 4.5 or newer (4.8 recommended).
 - The supported desktop game executable, build date **2026-11-02**. Compatibility is tied to its SHA-256 and instruction bytes; a matching version name alone is insufficient.
-- The trainer executable in the same directory as `AzerothSurvivors.exe` and the game's normal data files.
+- The supported game installed anywhere on your PC. The trainer can run from any folder.
 - The trainer and game running as the same Windows user with matching administrator privileges.
 
 Building uses Windows PowerShell and the 64-bit C# compiler shipped with .NET Framework. No Visual Studio, .NET SDK, NuGet packages, Python, or Cheat Engine is required. Game files are not included in this repository.
@@ -27,9 +27,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 
 The script produces **`build\Azeroth Trainer Plus.exe` inside the repository**. Source and output paths are resolved relative to the script, so the build also works when invoked from another directory. Build output is ignored by Git.
 
-Copy the built executable beside your installed `AzerothSurvivors.exe`, or build and copy it in one command using `-GameDirectory`. Close the installed trainer before replacing its executable.
+Run `build\Azeroth Trainer Plus.exe` directly, or move it to any writable folder. The trainer detects a running game automatically. **Launch game** uses the game beside the trainer or a remembered location; if neither exists, it opens a folder picker. Your selected or detected location is remembered in `%LOCALAPPDATA%\AzerothSurvivorsTrainer\game-path.txt`.
 
-For a repository in its own folder inside the game directory, run this from the repository root:
+Optionally, copy the executable beside the game during the build. For a repository inside the game directory, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -GameDirectory '..'
@@ -43,7 +43,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -GameDir
 
 `-GameDirectory` must contain `AzerothSurvivors.exe`. Relative game paths are resolved from your current PowerShell directory. Only the trainer executable is copied; the game's data and runtime backups stay in place.
 
-Recommended local layout:
+Example layout when using the optional copy step:
 
 ```text
 Azeroth Survivors/
@@ -62,17 +62,17 @@ Azeroth Survivors/
     game-check.txt            (created by compatibility diagnostics)
 ```
 
-Keep the repository in its own directory. When cloning from the game directory, Git creates the `AzerothSurvivors-trainer` child folder automatically. The game directory itself is outside the repository. The separate `trainer` folder beside the game holds runtime reports and profile backups.
+Keep the repository in its own directory. When cloning from the game directory, Git creates the `AzerothSurvivors-trainer` child folder automatically. The game directory itself is outside the repository. The `trainer` folder beside the trainer executable holds its runtime reports and profile backups, wherever you run it.
 
 ## Start and use
 
-From the installed game directory:
+From the repository root (or open the executable in Explorer):
 
 ```powershell
-Start-Process '.\Azeroth Trainer Plus.exe'
+Start-Process '.\build\Azeroth Trainer Plus.exe'
 ```
 
-1. Start the game yourself or click **Launch game** in the trainer.
+1. Start the game yourself or click **Launch game** and choose its folder if prompted. You can skip Launch game when the game is already running; Enable trainer finds it automatically.
 2. Select the options you want in the five tabs, then click **Enable trainer**.
 3. After changing switches, values, or selection rules, click **Apply options**.
 4. Resource, healing, clock, talent, and marks buttons send their requests immediately when clicked; an active trainer connection is required.
@@ -92,48 +92,23 @@ Run edits wait for an active run update. Permanent class edits show completion i
 
 ## Rarity and rolls
 
-- **Override spell legendary chance** and **Override in-run item legendary chance** are separate switches and percentages. Each supports 0-100% in 0.1% steps. The item switch covers both jewelry roll paths: rings, trinkets and amulets. Changes affect future offers and rerolls; main-menu permanent equipment and already offered cards use separate rules.
-- **Fixed paid reroll cost** keeps the selected gold price instead of multiplying it after each roll. Set 0 for free paid rerolls. Existing free tokens are consumed first. Paid-roll history is preserved, so the original escalating price resumes from that history when this option is disabled.
-- **Unlimited banishes / free rerolls** replenish those counters to 9,999 on simulation ticks.
-
-Legendary percentages apply to each card independently, not the whole hand. The remaining probability follows the game's normal luck weights. Normal upgrade availability still applies; in particular, the game's fallback can promote an exhausted lower rarity even with its random legendary probability set to zero.
+Set separate legendary chances for spell and item cards (0-100%). Changes affect future run offers. Set a fixed paid reroll price, including zero, or enable unlimited banishes/free rerolls. Existing free tokens are spent first; permanent menu equipment is unaffected.
 
 ## Run and time
 
-- Check **Simulation speed** to enable it; the number alone is inactive while unchecked. It scales the time step used by the local run simulation. 1x is normal, lower values slow it down and up to 10x speeds it up. Zero stops simulated time advancing; client rendering and already-due actions can still update. Combat, cooldowns and the run clock use the scaled step. Above 1x, each step is longer; the trainer does not execute extra normal-sized steps. Fast projectiles and movement can skip collisions, especially near 10x. Use lower speeds if that changes combat too much.
-- **Advance clock (seconds)** adds 0-3,600 seconds to the run clock. This can make scheduled bosses due sooner. It does not defeat them or declare victory. Large jumps can make several timed events due together.
-- Check **Run XP multiplier** to enable it. It scales incoming run XP from 0.1x to 100x, including XP sent by the resource button. Fractional XP carries across awards per run object: at 0.5x, two 1-XP awards yield 1 XP in total; at 1.5x, they yield 3 XP. Multipliers use thousandths, and carry resets when the multiplier changes or the run clock goes backward. The game's normal level-up and offer generation then handles that XP.
-- **Auto-heal while alive / Heal now** refill current HP from the game's computed maximum HP. Auto-heal does not revive a defeated hero and is not a guarantee against lethal damage between updates.
-- **Run resource** lets you set gold, remaining banishes, free rerolls or shield, or grant an amount of run XP. Select the resource, choose the value and click **Set / grant**.
-
-The shared mutable tick handles solo and co-op paths. Run requests are consumed at the next active-run/offer update; lobby and results screens leave them pending. Requests sent from a menu wait for a run to update. These edits and XP grants execute before the mutable run step, outside the read-only HUD function. Granted resources, elapsed clock advances and earned upgrades are not undone by Disable. Disabling unlimited options stops replenishment; existing tokens remain. Damage/pickup values already raised can remain until the game next recalculates those stats. Disable restores code, not a snapshot of the run.
+Set simulation speed (0-10x), XP gain (0.1-100x), or auto-heal. Set gold, banishes, rerolls, and shield; grant XP, heal now, or advance the clock up to 3,600 seconds. Requests wait for an active run. High speeds can skip collisions; healing does not revive. Disable does not undo grants or clock changes.
 
 ## Auto-pick
 
-Spell and in-run item offers have separate switches and selection rules: **Left**, **Middle**, **Right**, **Random**, or **Highest rarity**. Highest rarity chooses the leftmost card when tied. If a requested position is missing, the last available card is used. These controls cover the current run's offers, including guardian/cache jewelry.
-
-The optional delay is 0-10 seconds (initially 0.5), measured using ordinary frame time independently of simulation speed. The timer resets when the game deals/rerolls an offer. One card is selected per update through the game's existing choice handler, which handles applying the upgrade and consuming the offer. Auto-pick can learn spells or replace equipment. It does not optimize a build, reroll, banish, or skip an offer. Both switches start off.
+Choose spell and item offers independently: left, middle, right, random, or highest rarity. Delay: 0-10 real-time seconds. Ties choose the leftmost card; missing positions use the last available card. Picks consume offers and can replace gear.
 
 ## Run stats
 
-Check individual rows in **Run stats**, enter their minimums, then click **Apply options**. All 20 rows start off:
-
-- Maximum health, damage bonus, haste, critical chance, critical damage and armor.
-- Area, extra targets, echo chance, movement speed, regeneration and pickup radius.
-- Remaining lives, experience bonus, gold bonus, luck, buff power, DoT stack limit, DoT haste and kill heal.
-
-Percentages use the character sheet's units: a 500% damage bonus means a total multiplier of 6; critical damage 300% means 3x critical damage. Haste 100% limits cooldowns to half their base duration. Armor is limited to 60%; the verified DoT stack limit is 1-4. Health sets a maximum-HP minimum; use **Heal now** to refill current HP. Lives are replenished to the selected minimum. The experience bonus affects the game's pickup scaling and stacks with the separate run XP multiplier if both are enabled.
-
-Stronger normal bonuses are preserved. Disable stops enforcement; modified stats can remain until the game recalculates them, and consumed/granted lives are not rolled back. Lifesteal and thorns are derived from effects and remain unexposed until their effect handling is verified.
+Enable any of 20 stat minimums, enter values, and click **Apply options**. Stronger bonuses stay. Health sets max HP; **Heal now** refills it. Armor caps at 60%; DoT stacks at 4. Disable stops enforcement, but existing values may remain until recalculated.
 
 ## Talents and marks
 
-Select a class explicitly before using these controls:
-
-- **Earned talent points** sets that class's earned budget to 0-51, the cap verified in this desktop build. The trainer sets the corresponding class talent XP through the game's profile structure and invokes the game's save method. It does not allocate talents for you. Lowering below the total already allocated ranks is refused; respec the class first.
-- **Class marks** sets the class's balance in 0.1-mark steps. The game's internal representation uses tenths. Gear unlock and Heroic requirements still apply.
-
-These edits affect permanent class progression. Before each request, the trainer copies the current default profile file into **trainer/backups** with a unique name. Each request has a sequence ID; an older completion cannot report success for a newer edit. Success is acknowledged after the game's save method returns. Wait for the update status before closing; reopen the Armory to refresh its display. Talent allocations are chosen between runs. Backups copy the game's encrypted profile as-is; the trainer does not decode or rewrite its save format.
+Select a class, then set earned talent points (0-51) or marks. These changes are permanent, with profile backups in `trainer/backups`. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory to refresh. Normal unlock requirements still apply.
 
 ## Compatibility and lifecycle
 
@@ -147,14 +122,14 @@ Generated hooks have registered Windows unwind information. They reuse the origi
 
 ## Compatibility diagnostics
 
-The production executable includes two read-only compatibility commands. Run them from the installed game directory:
+The production executable includes two read-only compatibility commands. Run them from the folder containing your trainer executable:
 
 ```powershell
 Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
 Get-Content .\trainer\game-check.txt
 ```
 
-`--verify-files` works with the game closed. It verifies the on-disk executable hash, 18 instruction sites, and six original unwind frames. It does not launch the game or inspect a live process.
+`--verify-files` works with the game closed. It verifies the on-disk executable hash, 18 instruction sites, and six original unwind frames. It does not launch the game or install hooks. It can read a running process's executable path to find the game; otherwise it uses the adjacent or remembered executable. If needed, pass a game directory explicitly: `--verify-files "F:\Games\Azeroth Survivors"`.
 
 To inspect an already running game, close other trainers normally and run:
 
@@ -180,9 +155,9 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | Symptom | What to do |
 | --- | --- |
 | Unsupported build | Run `--verify-files`. Offsets and expected bytes must be reverified for a changed game executable; bypassing the hash is insufficient. |
-| Game file missing / Launch game fails | Place the trainer executable beside `AzerothSurvivors.exe`. |
+| Game not found | Click Launch game and choose the folder containing `AzerothSurvivors.exe`, or start the game yourself and click Enable trainer. |
 | Cannot access the game | Match the game's Windows account and administrator privileges. |
-| More than one game copy is running | Close extra instances and connect to the game beside this trainer. |
+| More than one game copy is running | Close extra instances, then enable the trainer. |
 | Older trainer or changed code detected | Disable and close older trainers normally. Restart the game if one was terminated while active. |
 | Game is executing code that needs replacing | Wait briefly and retry Apply options or Disable. |
 | Partially enabled | Keep the trainer open. Click Apply options to finish or Disable to restore code. Follow any further restoration error instructions before closing. |
@@ -199,6 +174,7 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | --- | --- |
 | `scripts/build.ps1` | Builds into `build` using an explicit production source list; optionally installs the executable with `-GameDirectory` |
 | `src/Program.cs` | Windows Forms entry point and compatibility command dispatch |
+| `src/Game/GameLocator.cs` | Running-game discovery and remembered installation location |
 | `src/UI/TrainerWindow.cs` | Five-tab interface, option validation, request status, and creator links |
 | `src/Hooks/HookEngine.cs` | Supported build data, instruction assembly, patch lifecycle, session management, resources, and profile backups |
 | `src/Hooks/AdditionalCode.cs` | Run, XP, and permanent progression hook generation |

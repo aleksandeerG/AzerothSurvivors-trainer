@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
@@ -282,32 +281,18 @@ namespace AzerothTrainer
         }
         MemoryPatch AddGenerated(IntPtr image,int rva,byte[] original,Func<IntPtr,byte[]> code)
         {var p=new MemoryPatch(handle,Game.Id,Native.Add(image,rva),original,original.Length,code,rva);all.Add(p);return p;}
-        internal static PatchSession Attach(string path)
+        internal static PatchSession Attach()
         {
-            string hash;
-            using(var sha=SHA256.Create())using(var file=File.OpenRead(path))hash=BitConverter.ToString(sha.ComputeHash(file)).Replace("-","").ToLowerInvariant();
-            if(hash!=RarityCode.SupportedHash)throw new Exception("This game build is unsupported. Verified offsets are required after a game update.");
-            int id=0;IntPtr imageBase=IntPtr.Zero;
-            Process[] processes=Process.GetProcessesByName("AzerothSurvivors");
+            Process selected=GameLocator.FindRunning();
+            if(selected==null)throw new Exception("Start Azeroth Survivors yourself or click Launch game, then enable the trainer.");
             try
             {
-                foreach(Process p in processes)
-                {
-                    try
-                    {
-                        var module=p.MainModule;
-                        if(!String.Equals(Path.GetFullPath(module.FileName),Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase))continue;
-                        if(id!=0)throw new Exception("More than one game copy is running. Close the extra copy first.");
-                        id=p.Id;imageBase=module.BaseAddress;
-                    }
-                    catch(Win32Exception ex){if(ex.NativeErrorCode==5)throw new Exception(PrivilegeMessage,ex);throw;}
-                    catch(InvalidOperationException){/* A candidate exited during enumeration. */}
-                }
+                var module=selected.MainModule;string path=module.FileName,hash;
+                using(var sha=SHA256.Create())using(var file=File.OpenRead(path))hash=BitConverter.ToString(sha.ComputeHash(file)).Replace("-","").ToLowerInvariant();
+                if(hash!=RarityCode.SupportedHash)throw new Exception("This game build is unsupported. Verified offsets are required after a game update.");
+                GameLocator.Remember(path);return new PatchSession(selected,module.BaseAddress);
             }
-            finally{foreach(Process p in processes)p.Dispose();}
-            if(id==0)throw new Exception("Start Azeroth Survivors, then enable the trainer.");
-            Process selected=Process.GetProcessById(id);
-            try{return new PatchSession(selected,imageBase);}catch{selected.Dispose();throw;}
+            catch{selected.Dispose();throw;}
         }
         internal void Apply(TrainerOptions options)
         {

@@ -6,19 +6,20 @@ namespace AzerothTrainer
     internal static class UnwindSupport
     {
         static readonly object gate=new object();
-        static readonly System.Collections.Generic.Dictionary<int,byte[]> frames=new System.Collections.Generic.Dictionary<int,byte[]>();
+        static readonly System.Collections.Generic.Dictionary<string,byte[]> frames=new System.Collections.Generic.Dictionary<string,byte[]>(StringComparer.OrdinalIgnoreCase);
         static byte[] ReadAt(FileStream file,long offset,int count)
         {
             byte[] bytes=new byte[count];file.Position=offset;int done=0;
             while(done<count){int n=file.Read(bytes,done,count-done);if(n==0)throw new EndOfStreamException("Incomplete unwind metadata.");done+=n;}return bytes;
         }
-        internal static byte[] FrameFor(int sourceRva)
+        internal static byte[] FrameFor(int sourceRva,string gamePath)
         {
             lock(gate)
             {
-                byte[] cached;if(frames.TryGetValue(sourceRva,out cached))return (byte[])cached.Clone();
+                string key=Path.GetFullPath(gamePath)+"|"+sourceRva;
+                byte[] cached;if(frames.TryGetValue(key,out cached))return (byte[])cached.Clone();
                 byte[] info;
-                using(var file=File.OpenRead(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"AzerothSurvivors.exe")))
+                using(var file=File.OpenRead(gamePath))
                 {
                     int pe=BitConverter.ToInt32(ReadAt(file,60,4),0);byte[] coff=ReadAt(file,pe,24),optional=ReadAt(file,pe+24,BitConverter.ToUInt16(coff,20));
                     byte[] sections=ReadAt(file,pe+24+optional.Length,40*BitConverter.ToUInt16(coff,6));
@@ -50,7 +51,7 @@ namespace AzerothTrainer
                         if(op==6||op==7||op>10)throw new Exception("Unknown unwind operation.");i+=slots;
                     }
                 }
-                frames.Add(sourceRva,info);return (byte[])info.Clone();
+                frames.Add(key,info);return (byte[])info.Clone();
             }
         }
         internal static ulong Invoke(IntPtr handle,int pid,IntPtr cave,IntPtr function,ulong a,ulong b,ulong c)
@@ -92,7 +93,8 @@ namespace AzerothTrainer
         internal static void Register(IntPtr handle,int pid,IntPtr cave,int codeLength,int sourceRva)
         {
             if(codeLength>=3500)throw new Exception("Generated hook is too large for its metadata page.");
-            byte[] frame=FrameFor(sourceRva);Native.Write(handle,Native.Add(cave,3680),frame);
+            byte[] frame;using(Process process=Process.GetProcessById(pid))frame=FrameFor(sourceRva,process.MainModule.FileName);
+            Native.Write(handle,Native.Add(cave,3680),frame);
             byte[] table=new byte[24];Array.Copy(BitConverter.GetBytes(codeLength),0,table,4,4);Array.Copy(BitConverter.GetBytes(3680),0,table,8,4);
             Array.Copy(BitConverter.GetBytes(3900),0,table,12,4);Array.Copy(BitConverter.GetBytes(4000),0,table,16,4);Array.Copy(BitConverter.GetBytes(3840),0,table,20,4);
             Native.Write(handle,Native.Add(cave,3584),table);

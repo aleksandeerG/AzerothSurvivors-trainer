@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 $outputPath = Join-Path $outputDirectory 'Azeroth Trainer Plus.exe'
 $sourceFiles = @(
     'src\Program.cs'
+    'src\Game\GameLocator.cs'
     'src\UI\TrainerWindow.cs'
     'src\Hooks\HookEngine.cs'
     'src\Hooks\AdditionalCode.cs'
