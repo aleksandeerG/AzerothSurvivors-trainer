@@ -26,7 +26,7 @@ namespace AzerothTrainer
             dependencies[TrainerFeature.RunControls]=new[]{"Run"};dependencies[TrainerFeature.XpScaling]=new[]{"Xp"};
             dependencies[TrainerFeature.RunResources]=new[]{"Run"};dependencies[TrainerFeature.Banishes]=new[]{"Run"};
             dependencies[TrainerFeature.Gold]=new[]{"Run"};dependencies[TrainerFeature.FreeRerolls]=new[]{"Run"};dependencies[TrainerFeature.Shield]=new[]{"Run","Health"};
-            dependencies[TrainerFeature.Stats]=new[]{"Run","Health"};dependencies[TrainerFeature.HealthFloor]=new[]{"Health"};
+            dependencies[TrainerFeature.Stats]=new[]{"Run"};dependencies[TrainerFeature.HealthFloor]=new[]{"Health"};
             dependencies[TrainerFeature.AutoPick]=new[]{"Run","Choose"};dependencies[TrainerFeature.XpGrant]=new[]{"Run","Xp"};
             dependencies[TrainerFeature.ClassProgression]=new[]{"Profile","ProfileActions","EnsureClass","SaveProfile","WriteCharacters","CharacterPath","SaveRoot"};
             dependencies[TrainerFeature.ClassMarks]=new[]{"Profile","ProfileActions","SaveProfile","GrowMarks","MarksRecord","WriteCharacters","CharacterPath","SaveRoot"};
@@ -49,15 +49,15 @@ namespace AzerothTrainer
                     switch(dependency.Key)
                     {
                         case TrainerFeature.ItemChance:Need(discovery.ReviewedRelease||Valid("ItemBuilder"),"The native item-builder link is unavailable.");if(discovery.Functions.ContainsKey("ItemBuilder"))Need(Valid("ItemBuilder"),Reason("ItemBuilder"));break;
-                        case TrainerFeature.RerollCost:Need(PriceCount>0&&Valid("PriceAction"),"No owner-proven paid reroll action was recognized. "+Reason("Prices"));break;
+                        case TrainerFeature.RerollCost:Need(discovery.PricesComplete&&PriceCount>0&&Valid("PriceAction"),"Incomplete or unproven reroll pricing. "+Reason("Prices"));break;
                         case TrainerFeature.RunResources:Fields("hp","maxHp","phase","clock");break;
                         case TrainerFeature.Gold:Fields("hp","phase","clock","gold");break;
                         case TrainerFeature.FreeRerolls:Fields("hp","phase","clock","rerolls");break;
                         case TrainerFeature.Shield:Fields("hp","phase","clock","shield");break;
                         case TrainerFeature.Banishes:Fields("hp","phase","clock","banishes");break;
                         case TrainerFeature.Stats:
-                            Fields("hp","phase","clock","attributes");
-                            Need(discovery.ReviewedRelease,"Stat meanings have only been reviewed for the two archived releases. A store at a relative offset does not establish its meaning; stat rows are refused on other executables.");break;
+                            Fields("hp","phase","clock");
+                            Need(RunStat.All.Where(s=>s.Field!=0x5c8&&s.Field!=0x628).Any(s=>HasStatField(s.Field)),"No stat row has a native semantic witness or reviewed layout.");break;
                         case TrainerFeature.HealthFloor:Fields("maxHp");break;
                         case TrainerFeature.AutoPick:Fields("hp","phase","clock","coop","offers","offerCount","offerKind");Need(OfferStride>0,"Offer element stride was not decoded.");Need(Field("offerCount")==Field("offers")+8,"Offer vector pointer/count spacing changed.");if(Valid("Health"))Edge("Choose","Health");break;
                         case TrainerFeature.CoopAutoPick:Fields("hp","phase","clock","coop","coopPhase","offers","offerCount","offerKind");Need(OfferStride>0,"Offer stride is unavailable.");Edge("Run","Coop");break;
@@ -145,6 +145,7 @@ namespace AzerothTrainer
             Dictionary<string,int> witnesses;Need(discovery.Fields.TryGetValue(name,out witnesses),name+": no decoded field witness.");
             var live=witnesses.Where(w=>Valid(w.Key)).ToArray();Need(live.Length>0,name+": no verified field witness remains.");
             int offset=live[0].Value;Need(live.All(w=>w.Value==offset),name+": decoded field witnesses disagree ("+String.Join(", ",live.Select(w=>w.Key+"=0x"+w.Value.ToString("x")).ToArray())+").");
+            if(name=="phase")Need(live.Select(w=>discovery.Functions[w.Key].Function.Start).Distinct().Count()>=2,"Run state has fewer than two independent live witnesses.");
             int width=Width(name);Need(offset>=0x100&&offset+width<=0x10000&&offset%width==0,name+": decoded field bounds/alignment failed.");
             foreach(var other in discovery.Fields)
             {
@@ -156,7 +157,20 @@ namespace AzerothTrainer
         }
         static bool Server(string name){return name=="profile"||name.StartsWith("marks")||name.StartsWith("talent");}
         static int Width(string name){return name=="offers"||name=="offerCount"||Server(name)?8:name=="phase"||name=="coop"||name=="coopPhase"||name=="offerKind"?1:4;}
-        internal int StatField(int reference){if(reference==0x628)return Field("lives");int relative=checked(reference-0x560);Need(relative>=0&&relative+4<=0xd0,"Unknown stat member.");return checked(Field("attributes")+relative);}
+        bool HasStatField(int reference){try{StatField(reference);return true;}catch{return false;}}
+        internal bool SupportsStat(int index)
+        {
+            if(index<0||index>=RunStat.All.Length)return false;
+            return Supports(PatchSession.StatFeature(index))&&HasStatField(RunStat.All[index].Field);
+        }
+        internal int StatField(int reference)
+        {
+            if(reference==0x628)return Field("lives");if(reference==0x5c8)return Field("maxHp");
+            var stat=RunStat.All.FirstOrDefault(s=>s.Field==reference);Need(stat!=null,"Unknown stat member.");
+            if(stat.Key!=null&&discovery.Fields.ContainsKey("stat."+stat.Key))return Field("stat."+stat.Key);
+            Need(discovery.ReviewedRelease,"No native value flow proves the meaning of "+stat.Name+".");
+            int relative=checked(reference-0x560);return checked(Field("attributes")+relative);
+        }
         internal void ValidateLive(IntPtr handle,IntPtr imageBase)
         {
             var image=discovery.Image;long delta=imageBase.ToInt64()-image.PreferredBase;
@@ -174,6 +188,7 @@ namespace AzerothTrainer
             Evaluate();RequireAny();
         }
         internal string Summary {get{return Name+"; "+AvailableCount+"/"+dependencies.Count+" independent capabilities available; "+discovery.Functions.Count+" functions and "+discovery.Sites.Count+" sites recognized. SHA-256 "+Hash+"; version token: "+version;}}
-        internal string Details {get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,dependencies.Keys.Select(f=>FeatureName(f)+": "+(Supports(f)?"available":"UNAVAILABLE: "+unavailable[f])).ToArray())+Environment.NewLine+"Decoded fields:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Fields.Select(f=>f.Key+": "+String.Join(", ",f.Value.Select(w=>w.Key+" +0x"+w.Value.ToString("x")+(Valid(w.Key)?"":" (unavailable)")).ToArray())).ToArray())+Environment.NewLine+"Recognition failures:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Failures.Select(f=>f.Key+": "+f.Value).ToArray());}}
+        internal string StatDetails {get{return "Stat rows:"+Environment.NewLine+String.Join(Environment.NewLine,RunStat.All.Select((stat,index)=>stat.Name+": "+(SupportsStat(index)?"available +0x"+StatField(stat.Field).ToString("x"):"UNAVAILABLE (field meaning or required hook unproven)")).ToArray());}}
+        internal string Details {get{return Summary+Environment.NewLine+StatDetails+Environment.NewLine+String.Join(Environment.NewLine,dependencies.Keys.Select(f=>FeatureName(f)+": "+(Supports(f)?"available":"UNAVAILABLE: "+unavailable[f])).ToArray())+Environment.NewLine+"Decoded fields:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Fields.Select(f=>f.Key+": "+String.Join(", ",f.Value.Select(w=>w.Key+" +0x"+w.Value.ToString("x")+(Valid(w.Key)?"":" (unavailable)")).ToArray())).ToArray())+Environment.NewLine+"Recognition failures:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Failures.Select(f=>f.Key+": "+f.Value).ToArray());}}
     }
 }

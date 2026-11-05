@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using Iced.Intel;
 namespace AzerothTrainer
 {
     internal sealed class ImageFunction
@@ -18,6 +19,8 @@ namespace AzerothTrainer
         }
         readonly byte[] bytes;
         readonly List<Section> sections=new List<Section>();
+        sealed class Transfer {internal int Source,Target;}
+        List<Transfer> transfers;
         internal readonly List<ImageFunction> Functions=new List<ImageFunction>();
         internal readonly List<int> Relocations=new List<int>();
         internal readonly Dictionary<int,string> Imports=new Dictionary<int,string>();
@@ -115,6 +118,45 @@ namespace AzerothTrainer
         {
             foreach(var section in sections)if(rva>=section.Rva&&(long)rva<(long)section.Rva+Math.Max(section.Size,section.VirtualSize))return true;
             return false;
+        }
+        internal void CheckIncoming(int begin,int end,ImageFunction owner,Dictionary<int,int> dependencies)
+        {
+            if(transfers==null)
+            {
+                transfers=new List<Transfer>();
+                foreach(var section in sections)
+                {
+                    if((section.Flags&0x20000000)==0)continue;
+                    for(int at=section.Raw;at<section.Raw+section.Size;at++)
+                    {
+                        byte op=bytes[at];int size=0,delta=0,remaining=section.Raw+section.Size-at;
+                        if((op==0xe8||op==0xe9)&&remaining>=5){size=5;delta=BitConverter.ToInt32(bytes,at+1);}
+                        else if((op==0xeb||op>=0x70&&op<=0x7f)&&remaining>=2){size=2;delta=unchecked((sbyte)bytes[at+1]);}
+                        else if(op==0x0f&&remaining>=6&&bytes[at+1]>=0x80&&bytes[at+1]<=0x8f){size=6;delta=BitConverter.ToInt32(bytes,at+2);}
+                        if(size==0)continue;long source=(long)section.Rva+at-section.Raw,target=source+size+delta;
+                        if(target<0||target>Int32.MaxValue)continue;
+                        var destination=FunctionAt((int)target);
+                        if(destination==null||target==destination.Start||source>=destination.Start&&source<destination.Start+destination.Length)continue;
+                        transfers.Add(new Transfer{Source=(int)source,Target=(int)target});
+                    }
+                }
+                transfers.Sort((a,b)=>a.Target.CompareTo(b.Target));
+            }
+            int low=0,high=transfers.Count;while(low<high){int middle=low+(high-low)/2;if(transfers[middle].Target<begin)low=middle+1;else high=middle;}
+            for(int at=low;at<transfers.Count&&transfers[at].Target<end;at++)
+            {
+                var branch=transfers[at];if(branch.Source>=owner.Start&&branch.Source<owner.Start+owner.Length)continue;
+                var function=FunctionAt(branch.Source);if(function==null)continue; // Raw bytes outside function metadata do not establish an instruction.
+                var decoder=Iced.Intel.Decoder.Create(64,new ByteArrayCodeReader(Read(function.Start,function.Length)));decoder.IP=(ulong)function.Start;
+                while(decoder.IP<=(ulong)branch.Source)
+                {
+                    Instruction i;decoder.Decode(out i);if(i.IsInvalid)throw new Exception("Cannot establish the boundary of a possible incoming branch from a split function.");
+                    if(i.IP!=(ulong)branch.Source)continue;
+                    if(i.Op0Kind!=OpKind.NearBranch64||i.NearBranchTarget!=(ulong)branch.Target)break;
+                    if(branch.Target!=begin)throw new Exception("A decoded branch from another function fragment enters patched bytes at RVA 0x"+branch.Target.ToString("x")+".");
+                    dependencies[branch.Source]=i.Length;break;
+                }
+            }
         }
         internal ImageFunction FunctionAt(int rva)
         {

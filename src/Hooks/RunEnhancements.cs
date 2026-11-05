@@ -4,6 +4,7 @@ namespace AzerothTrainer
     internal sealed class RunStat
     {
         internal readonly string Name,Unit;internal readonly int Field,Kind;internal readonly double Min,Max,Default;
+        internal string Key {get{switch(Field){case 0x5cc:return "damage";case 0x5d0:return "cooldown";case 0x5d4:return "crit";case 0x5dc:return "speed";case 0x5e0:return "pickup";case 0x5e8:return "armor";case 0x5f0:return "regen";default:return null;}}}
         // Kind: 0 raw float, 1 percent bonus on a base of one, 2 fraction,
         // 3 haste (reciprocal cooldown), 4 integer, 5 total DOT stacks (base one).
         internal RunStat(string name,string unit,int field,int kind,double min,double max,double value)
@@ -42,7 +43,7 @@ namespace AzerothTrainer
         {
             for(int i=0;i<All.Length;i++)
             {
-                if(!layout.Supports(All[i].Field==0x628?TrainerFeature.Lives:TrainerFeature.Stats))continue;
+                if(!layout.SupportsStat(i))continue;
                 var stat=All[i];int at=DataOffset+i*Stride;string done="stat"+i;
                 // Each value and enabled flag is published as one aligned word.
                 a.Emit("83 B8");a.Bytes.AddRange(BitConverter.GetBytes(at+4));a.Emit("00");a.Branch("0F 84",done); // cmp dword [rax+enabled],0

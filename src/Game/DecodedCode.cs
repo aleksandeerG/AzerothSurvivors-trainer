@@ -123,6 +123,9 @@ namespace AzerothTrainer
             if(index+1<Instructions.Length)yield return index+1;
         }
         internal void DeadAfter(int index,params Register[] registers)
+        {DeadAfter(index,2,registers);}
+        internal void RequireSingleIntegerArgument(){DeadAfter(0,16,new[]{Register.RDX,Register.R8,Register.R9});}
+        void DeadAfter(int index,int depth,Register[] registers)
         {
             var factory=new InstructionInfoFactory();
             foreach(Register register in registers)
@@ -137,14 +140,14 @@ namespace AzerothTrainer
                     foreach(var use in info.GetUsedRegisters())if(Full(use.Register)==full&&Write(use.Access))bits&=~RegisterBits(use.Register,true);
                     // R10/R11 are volatile and are not argument or return registers
                     // in the verified Windows x64 call convention.
-                    if(instruction.FlowControl==FlowControl.Call||instruction.FlowControl==FlowControl.IndirectCall)
+                    if((instruction.FlowControl==FlowControl.Call||instruction.FlowControl==FlowControl.IndirectCall)&&!PreservesProbeArguments(at))
                     {
                         if(full==Register.RAX||register==Register.XMM0||full==Register.R10||full==Register.R11)bits=0;
                         else if(bits!=0)
                         {
-                            if(FloatingMathImport(instruction,full)){bits=0;continue;}
+                            if(UnusedImportArgument(instruction,full)){bits=0;continue;}
                             if(instruction.Op0Kind!=OpKind.NearBranch64)throw new Exception("Cannot prove "+register+" dead across an indirect call.");
-                            CallDoesNotRead(instruction.NearBranchTarget,full,bits,2);bits=0;
+                            CallDoesNotRead(instruction.NearBranchTarget,full,bits,depth);bits=0;
                         }
                     }
                     if(bits==0)continue;
@@ -165,7 +168,7 @@ namespace AzerothTrainer
         }
         void CallDoesNotRead(ulong target,Register register,ulong initial,int depth)
         {
-            if(depth<0||target>Int32.MaxValue||!Image.Executable((int)target,1))throw new Exception("Callee argument liveness cannot be resolved.");
+            if(depth<0||target>Int32.MaxValue||!Image.Executable((int)target,1))throw new Exception("Callee argument liveness cannot be resolved at RVA 0x"+target.ToString("x")+" (remaining call depth "+depth+").");
             var function=Image.FunctionAt((int)target);if(function!=null&&function.Start!=(int)target)throw new Exception("Callee does not start at a function boundary.");
             // Small leaf math helpers legitimately have no .pdata entry. Decode
             // only reachable instructions, with bounded byte and call budgets.
@@ -184,11 +187,16 @@ namespace AzerothTrainer
                 if(bits==0||i.FlowControl==FlowControl.Return)continue;
                 if(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall)
                 {
-                    if(i.Op0Kind!=OpKind.NearBranch64)throw new Exception("An indirect callee consumes an unresolved argument.");
+                    if(UnusedImportArgument(i,register))continue;
+                    // A call followed by UD2 has no returning continuation.
+                    // Explicit register reads above are still checked, but an
+                    // incoming argument cannot survive this abort-only path.
+                    if(i.NextIP+2<=end){byte[] next=Image.Read((int)i.NextIP,2);if(next[0]==0x0f&&next[1]==0x0b){Dependencies[(int)i.NextIP]=2;continue;}}
+                    if(i.Op0Kind!=OpKind.NearBranch64){string import;Image.Imports.TryGetValue(unchecked((int)i.IPRelativeMemoryAddress),out import);throw new Exception("An indirect callee consumes an unresolved argument at RVA 0x"+i.IP.ToString("x")+" "+import+".");}
                     CallDoesNotRead(i.NearBranchTarget,register,bits,depth-1);continue;
                 }
-                if(i.FlowControl==FlowControl.IndirectBranch&&FloatingMathImport(i,register))continue;
-                if(i.FlowControl==FlowControl.IndirectBranch||i.FlowControl==FlowControl.Exception)throw new Exception("Callee argument analysis encountered unresolved control flow.");
+                if(i.FlowControl==FlowControl.IndirectBranch&&UnusedImportArgument(i,register))continue;
+                if(i.FlowControl==FlowControl.IndirectBranch||i.FlowControl==FlowControl.Exception){string import;Image.Imports.TryGetValue(unchecked((int)i.IPRelativeMemoryAddress),out import);throw new Exception("Callee argument analysis encountered unresolved control flow at RVA 0x"+i.IP.ToString("x")+" "+import+".");}
                 if(i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)
                 {
                     ulong next=i.NearBranchTarget;
@@ -197,6 +205,20 @@ namespace AzerothTrainer
                 }
                 pending.Push(Tuple.Create(i.NextIP,bits));
             }
+        }
+        bool UnusedImportArgument(Instruction instruction,Register register)
+        {
+            if(FloatingMathImport(instruction,register))return true;
+            int position=register==Register.RCX?0:register==Register.RDX?1:register==Register.R8?2:register==Register.R9?3:-1;
+            if(position<0||!instruction.IsIPRelativeMemoryOperand||instruction.IPRelativeMemoryAddress>Int32.MaxValue)return false;
+            string import;if(!Image.Imports.TryGetValue((int)instruction.IPRelativeMemoryAddress,out import))return false;
+            int split=import.IndexOf('!');string library=import.Substring(0,split),name=import.Substring(split+1);
+            if(position==3&&(String.Equals(library,"VCRUNTIME140.dll",StringComparison.OrdinalIgnoreCase)||String.Equals(library,"ucrtbase.dll",StringComparison.OrdinalIgnoreCase)||String.Equals(library,"msvcrt.dll",StringComparison.OrdinalIgnoreCase))&&new[]{"memcpy","memmove","memcmp"}.Contains(name))return true; // Three integer arguments.
+            if(!String.Equals(library,"kernel32.dll",StringComparison.OrdinalIgnoreCase)&&!String.Equals(library,"kernelbase.dll",StringComparison.OrdinalIgnoreCase))return false;
+            // Published heapapi.h signatures: GetProcessHeap(void), HeapAlloc(heap, flags, bytes).
+            // https://learn.microsoft.com/windows/win32/api/heapapi/nf-heapapi-getprocessheap
+            // https://learn.microsoft.com/windows/win32/api/heapapi/nf-heapapi-heapalloc
+            return name=="GetProcessHeap"||name=="HeapAlloc"&&position>=3;
         }
         bool FloatingMathImport(Instruction instruction,Register register)
         {
@@ -226,6 +248,7 @@ namespace AzerothTrainer
         {
             if(first<0||last<=first||last>Instructions.Length||continuation<0||continuation>=Instructions.Length)throw new Exception("Invalid decoded patch boundaries.");
             ulong begin=Instructions[first].IP,end=Instructions[last-1].NextIP;
+            Image.CheckIncoming(checked((int)begin),checked((int)end),Function,Dependencies);
             // Replacing a decision tree makes its internal branches unreachable.
             // Confirm this from the decoded CFG, rather than accepting raw E8 bytes.
             var pending=new Stack<int>();var seen=new HashSet<int>();pending.Push(0);

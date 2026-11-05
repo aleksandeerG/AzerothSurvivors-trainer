@@ -261,6 +261,7 @@ namespace AzerothTrainer
         internal string CompatibilityDetails {get{return layout.Details;}}
         internal string UnavailableFeatures {get{return layout.UnavailableNames;}}
         internal bool Supports(TrainerFeature feature){return layout.Supports(feature);}
+        internal bool SupportsStat(int index){return layout.SupportsStat(index);}
         internal bool HighestRaritySupported {get{return layout.OfferRarity>0;}}
         internal int[] AvailableClasses
         {
@@ -461,7 +462,7 @@ namespace AzerothTrainer
             if(o.AutoHeal)Require(TrainerFeature.RunResources);if(o.UnlimitedReroll)Require(TrainerFeature.FreeRerolls);if(o.UnlimitedBanish)Require(TrainerFeature.Banishes);
             if(o.AutoSpellMode!=0||o.AutoItemMode!=0)Require(TrainerFeature.AutoPick);
             if((o.AutoSpellMode==5||o.AutoItemMode==5)&&layout.OfferRarity==0)throw new Exception("Highest rarity is unavailable: the offer rarity field was not recognized.");
-            for(int i=0;i<o.StatEnabled.Length;i++)if(o.StatEnabled[i])Require(StatFeature(i));
+            for(int i=0;i<o.StatEnabled.Length;i++)if(o.StatEnabled[i]){Require(StatFeature(i));if(!layout.SupportsStat(i))throw new Exception(RunStat.All[i].Name+": the stat field meaning is unproven for this game.");}
         }
         internal static TrainerFeature StatFeature(int index){return index==0?TrainerFeature.HealthFloor:RunStat.All[index].Field==0x628?TrainerFeature.Lives:TrainerFeature.Stats;}
         internal static void ValidateOptions(TrainerOptions o)

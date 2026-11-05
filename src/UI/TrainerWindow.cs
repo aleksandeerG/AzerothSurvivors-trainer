@@ -206,7 +206,7 @@ namespace AzerothTrainer
             FeatureSwitch(autoSpell,spellRule,TrainerFeature.AutoPick);FeatureSwitch(autoItem,itemRule,TrainerFeature.AutoPick);
             bool highest=session==null||session.HighestRaritySupported;
             foreach(var box in new[]{spellRule,itemRule}){if(!highest&&box.Items.Count==5){if(box.SelectedIndex==4)box.SelectedIndex=0;box.Items.RemoveAt(4);}else if(highest&&box.Items.Count==4)box.Items.Add(AutoPickCode.Rules[4]);}
-            bool any=false;foreach(DataGridViewRow row in stats.Rows){bool available=Available(PatchSession.StatFeature(row.Index));any|=available;row.ReadOnly=!available;if(!available)row.Cells[0].Value=false;row.DefaultCellStyle.BackColor=available?Color.White:SystemColors.Control;}stats.Enabled=any;
+            bool any=false;foreach(DataGridViewRow row in stats.Rows){bool available=session==null||session.SupportsStat(row.Index);any|=available;row.ReadOnly=!available;if(!available)row.Cells[0].Value=false;row.DefaultCellStyle.BackColor=available?Color.White:SystemColors.Control;}stats.Enabled=any;
             TrainerFeature resourceFeature=resourceKind.SelectedIndex==0?TrainerFeature.Gold:resourceKind.SelectedIndex==1?TrainerFeature.Banishes:resourceKind.SelectedIndex==2?TrainerFeature.FreeRerolls:resourceKind.SelectedIndex==3?TrainerFeature.Shield:TrainerFeature.XpGrant;
             if(resourceAction!=null)connectedFeatures[resourceAction]=resourceFeature;
             resourceKind.Enabled=Available(TrainerFeature.Gold)||Available(TrainerFeature.FreeRerolls)||Available(TrainerFeature.Shield)||Available(TrainerFeature.Banishes)||Available(TrainerFeature.XpGrant);resource.Enabled=Available(resourceFeature);
