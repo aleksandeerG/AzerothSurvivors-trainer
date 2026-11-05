@@ -24,6 +24,7 @@ namespace AzerothTrainer
         }
         int SelectedClass(){var value=classKind.SelectedItem as LoadedClass;if(value==null)throw new Exception("Wait for the game profile to load its class records.");return value.Id;}
         PatchSession session;bool busy;uint talentPending,marksPending;
+        bool profileSelected;
         internal TrainerWindow()
         {
             Text="Azeroth Survivors Trainer Plus";ClientSize=new Size(760,690);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
@@ -31,6 +32,12 @@ namespace AzerothTrainer
             Label(Controls,"Azeroth Survivors Trainer",22,17,700,38,new Font("Segoe UI",18,FontStyle.Bold));
             var tabs=new TabControl{Location=new Point(20,70),Size=new Size(720,410)};Controls.Add(tabs);
             var rarity=Tab(tabs,"Rarity and rolls");var run=Tab(tabs,"Run and time");var profile=Tab(tabs,"Talents and marks");var automation=Tab(tabs,"Auto-pick");var statTab=Tab(tabs,"Run stats");
+            tabs.SelectedIndexChanged+=delegate
+            {
+                profileSelected=tabs.SelectedTab==profile;
+                if(profileSelected&&!busy&&session!=null&&session.Connected&&(session.Supports(TrainerFeature.ClassProgression)||session.Supports(TrainerFeature.ClassMarks)))
+                    try{session.PrepareProfile();status.Text="Loading classes. Open the game's Armory if the list is empty.";}catch(Exception ex){ShowError(ex);}
+            };
             Check(rarity.Controls,spellOn,"Override spell legendary chance",18,18,480,false);Number(rarity.Controls,spell,538,18,120,0,100,50,1,0.1m);Label(rarity.Controls,"%",665,21,20,25,null);
             Check(rarity.Controls,itemOn,"Override in-run item legendary chance",18,66,480,false);Number(rarity.Controls,item,538,66,120,0,100,50,1,0.1m);Label(rarity.Controls,"%",665,69,20,25,null);
             Label(rarity.Controls,"Chance per card. Items: rings, trinkets and amulets.",18,113,660,42,null);
@@ -98,7 +105,7 @@ namespace AzerothTrainer
                 if(session!=null&&session.Exited){session.Dispose();session=null;}
                 if(session==null)session=await Task.Run(delegate{return PatchSession.Attach();});
                 ApplyCompatibility();options=Options();
-                await Task.Run(delegate{session.Apply(options);});status.ForeColor=Color.FromArgb(255,192,90);status.Text=ActiveSummary(options);
+                await Task.Run(delegate{session.Apply(options);if(profileSelected&&(session.Supports(TrainerFeature.ClassProgression)||session.Supports(TrainerFeature.ClassMarks)))session.PrepareProfile();});status.ForeColor=Color.FromArgb(255,192,90);status.Text=ActiveSummary(options);
             }
             catch(Exception ex){status.ForeColor=Color.LightCoral;status.Text=FailureStatus(session!=null&&session.Enabled);ShowError(ex);}
             finally{busy=false;SetBusy(false);}

@@ -23,6 +23,22 @@ namespace AzerothTrainer
         internal readonly Dictionary<int,string> Imports=new Dictionary<int,string>();
         internal readonly string Path,Hash;
         internal readonly long PreferredBase;
+        internal string VersionToken
+        {
+            get
+            {
+                byte[] marker=Encoding.ASCII.GetBytes("AzerothSurvivors/");
+                foreach(int at in Find(marker,false))
+                {
+                    try
+                    {
+                        byte[] data=Read(at,80);int end=marker.Length;while(end<data.Length&&((data[end]>='0'&&data[end]<='9')||data[end]=='.'||data[end]=='-'||data[end]=='+'))end++;
+                        if(end>marker.Length)return Encoding.ASCII.GetString(data,0,end);
+                    }catch{}
+                }
+                return "not present (identity is checked by code recognition)";
+            }
+        }
         internal GameImage(string path)
         {
             Path=System.IO.Path.GetFullPath(path);bytes=File.ReadAllBytes(Path);Hash=Digest(bytes);

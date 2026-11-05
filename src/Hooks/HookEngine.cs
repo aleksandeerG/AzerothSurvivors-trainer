@@ -287,6 +287,7 @@ namespace AzerothTrainer
         readonly GameLayout layout;
         uint talentSequence,marksSequence;
         bool disposed,connected;
+        TrainerOptions currentOptions=new TrainerOptions();
         internal bool Connected {get{return connected||Enabled;}}
         internal bool Enabled {get {foreach(var p in all)if(p.Enabled)return true;return false;}}
         internal bool Exited {get {if(disposed)return true;try{return Game.HasExited;}catch(InvalidOperationException){return true;}}}
@@ -349,15 +350,22 @@ namespace AzerothTrainer
             if(Exited)throw new Exception("The game has exited.");
             if(health!=null)
             {
-                health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
-                health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|(options.StatEnabled[0]?1UL<<32:0)));
+                if(options.StatEnabled[0])
+                {
+                    health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
+                    health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|1UL<<32));
+                }
+                else health.Remove();
             }
             if(xp!=null)
             {
                 if(options.XpEnabled){xp.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));p.Data(XpCode.CarryOffset,new byte[XpCode.CarrySlots*XpCode.CarryStride]);});xp.Data(0,BitConverter.GetBytes(XpCode.ScaleUnits(options.XpMultiplier)));}else xp.Remove();
             }
-            if(run!=null)ApplyRunOptions(options);
-            if(profile!=null)profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));p.Data(16,new byte[24]);});
+            if(run!=null)
+            {
+                bool needed=options.SpeedEnabled||options.AutoHeal||options.UnlimitedBanish||options.UnlimitedReroll||options.AutoSpellMode!=0||options.AutoItemMode!=0||options.StatEnabled.Where((on,index)=>index!=0).Any(on=>on);
+                if(needed||run.Enabled&&RunPending())ApplyRunOptions(options);else run.Remove();
+            }
             for(int index=0;index<rarity.Count;index++)
             {
                 var p=rarity[index];if(p==null)continue;double chance=index==0?options.SpellChance:options.ItemChance;
@@ -400,7 +408,29 @@ namespace AzerothTrainer
                     }
                 }
             }
-            connected=true;
+            currentOptions=options;connected=true;
+        }
+        bool RunPending()
+        {
+            return RunCommands.Offsets.Any(offset=>BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+offset),8),0)!=-1);
+        }
+        internal void PrepareProfile()
+        {
+            if(Exited||!Connected)throw new Exception("Enable the trainer first.");
+            if(profile==null)throw new Exception("Class edits are unavailable for this game.");
+            profile.Install(null,delegate(MemoryPatch p){p.Data(0,BitConverter.GetBytes(-1L));p.Data(8,BitConverter.GetBytes(-1L));p.Data(16,new byte[24]);});
+        }
+        void PrepareRun()
+        {
+            if(Exited||!Connected||run==null)throw new Exception("Enable the trainer first.");
+            if(!run.Enabled)ApplyRunOptions(currentOptions);
+            var timer=Stopwatch.StartNew();
+            while(timer.ElapsedMilliseconds<400)
+            {
+                if(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0)!=0)return;
+                System.Threading.Thread.Sleep(5);
+            }
+            throw new Exception("Waiting for a game update. Resume the game and retry the action.");
         }
         void ApplyRunOptions(TrainerOptions options)
         {
@@ -450,7 +480,7 @@ namespace AzerothTrainer
         void QueueBits(int offset,byte[] bytes)
         {
             Require(offset==RunCode.BanishRequest?TrainerFeature.Banishes:offset==RunCode.XpRequest?TrainerFeature.XpGrant:offset==RunCode.GoldRequest?TrainerFeature.Gold:offset==RunCode.FreeRerollRequest?TrainerFeature.FreeRerolls:offset==RunCode.ShieldRequest?TrainerFeature.Shield:TrainerFeature.RunResources);
-            if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
+            PrepareRun();
             ulong state=BitConverter.ToUInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),8),0);
             IntPtr owner=new IntPtr(BitConverter.ToInt64(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Owner),8),0));
             if(owner==IntPtr.Zero)throw new Exception("Enter a live run before sending a run action.");
@@ -462,7 +492,7 @@ namespace AzerothTrainer
         internal void CancelRunRequests()
         {
             Require(TrainerFeature.RunControls);
-            if(Exited||!run.Enabled)throw new Exception("Enable the trainer first.");
+            if(Exited||!Connected)throw new Exception("Enable the trainer first.");if(run==null||!run.Enabled)return;
             using(var frozen=new FrozenThreads(Game.Id))
                 foreach(int offset in RunCommands.Offsets)run.Data(offset,BitConverter.GetBytes(-1L));
         }
@@ -472,10 +502,11 @@ namespace AzerothTrainer
         {
             Require(offset==ProfileCode.MarksRequest?TrainerFeature.ClassMarks:TrainerFeature.ClassProgression);
             if(classId<1||classId>255)throw new ArgumentOutOfRangeException("class");
-            if(Exited||!profile.Enabled)throw new Exception("Enable the trainer first.");ProfileBackup.Create(handle);
+            PrepareProfile();
             using(var frozen=new FrozenThreads(Game.Id))
             {
                 if(!AvailableClasses.Contains(classId))throw new Exception("That class is not present in the loaded game profile. Open its Armory or play it once before editing.");
+                ProfileBackup.Create(handle);
                 uint sequence=offset==ProfileCode.TalentRequest?checked(++talentSequence):checked(++marksSequence);
                 profile.Data(offset,BitConverter.GetBytes(ProfileCode.PackRequest(sequence,classId,value)));return sequence;
             }

@@ -112,30 +112,36 @@ Enable any of 20 stat minimums and click **Apply options**. Stronger bonuses sta
 
 ## Talents and marks
 
-Connect and select a class from the loaded profile. Open its Armory or play it once if it is missing. Set earned points (0-51) or marks; a verified backup is required. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory. Pending edits warn on Disable/Close. Normal unlocks apply.
+Connect, open **Talents and marks**, and select a class from the loaded profile. Open its Armory or play it once if it is missing. Set earned points (0-51) or marks; a verified backup is required. Respec before lowering points below allocated ranks. Wait for confirmation and reopen the Armory. Pending edits warn on Disable/Close. Normal unlocks apply.
 
 ## Compatibility and lifecycle
 
-Runtime hooks use decoded x64 operations, control flow, string references and call relationships. The run update is anchored by its `WOW_ROGUE_SINK_AT` reference. Rarity decision trees, XP award entry, health recalculation, offer handler and price calculations are recognized independently. Whole-function fingerprints are reserved for the permanent-edit helpers `EnsureClass`, `SaveProfile` and the marks-vector allocator.
+Runtime hooks use decoded x64 operations, control flow and native call relationships. String references nominate functions; a missing `WOW_ROGUE_SINK_AT` debug string also has a decoded run-entry fallback. The co-op update supplies a second clock witness. Native UI values provide XP, gold and free-reroll evidence independently of price calculations.
 
-Fields and rarity/health registers are extracted from instructions. Witnesses must agree, stay aligned, and avoid overlap. The stat record must retain its verified member layout. Gold, free rerolls, shield, run states and offer vectors have separate evidence. Auto-pick identifies a changed hand from its card records, without depending on a UI-only offer counter. Marks require a small labeled serialization loop that proves the vector and eight-byte record format; unrelated serializer code can change.
+Register and stack-spill provenance traces Game/server arguments across instructions and control-flow merges. A unique byte shape is insufficient: XP must match the native UI XP field and call health recalculation with the same Game object; item rolls link to the native reroll builder; spell rolls must have the native iterator/Game context. Profile addresses must reach both verified save helpers from the same server argument, and the profile hook must call that action handler with its own server object.
 
-Compatibility is checked for **18 independent capabilities**: spell/item chances, paid pricing, speed, XP scaling, healing/clock, gold, free rerolls, shield, banishes, stat minimums, max-HP floor, remaining lives, solo/co-op auto-pick, XP grants, class talents and class marks. The shared run and profile hooks emit only supported operations. Losing a price or co-op handler does not discard unrelated run controls. The UI disables unsupported switches, individual stat rows and resource actions.
+Field evidence is retained rather than overwritten. Conflicting offsets, mismatched source registers, bad bounds, or overlapping fields disable their dependent capabilities. Discovery passes are isolated. A malformed candidate cannot discard independent spell, price, XP or profile features. Offer stride is decoded from native index arithmetic; an unfamiliar rarity member disables highest-rarity selection. Pricing accepts the decoded base cost and path count, with a verified native payment action; unsupported calculation shapes still refuse fixed pricing.
 
-Load checks prove instruction boundaries, reachable branch entries, scratch-register liveness and agreement between prologue instructions and unwind metadata. Required links include Run → XP and Choose → Health when those roles are available. Equivalent marks allocators are accepted by verified body and call targets, without depending on neighboring functions. Ambiguous contexts refuse their dependent capabilities.
+Compatibility is checked for **18 capabilities**: spell/item chances, paid pricing, speed, XP scaling, healing/clock, gold, free rerolls, shield, banishes, stat minimums, max-HP floor, remaining lives, solo/co-op auto-pick, XP grants, class talents and class marks. Each hook is trial-built at load, including the combined run hook. Missing operands, oversized generated code, unsafe replay instructions, and patch windows shorter than the 12-byte entry jump are rejected before Apply. Lives require every field used by run tracking.
 
-Before connecting, recognized live function bodies must agree with the checked executable, including ASLR relocations. A live mismatch disables its dependent capabilities. If none remain, connecting is refused. Diagnostics identify failed roles, field witnesses, register liveness, frame mismatches and call links. There is no force-enable option.
+Load checks cover decoded instruction boundaries, relative jump-table targets, scratch-register and return-value liveness, and agreement between prologue instructions and unwind metadata. Unresolved indirect branches refuse affected hook sites. Replayed instructions must be position independent and free of branches; the health hook also validates both `addss` operands. Equivalent marks allocators require matching bodies and call targets.
 
-SHA-256 identifies the executable in diagnostics; it is **not a version whitelist**. These are the verified reference builds:
+Stat names cannot be inferred from a sequence of stores. General stat rows therefore require an exact, reviewed reference executable. Remaining lives also requires a reviewed release; banishes can use a reviewed fallback when its native UI value cannot be proven. A changed executable cannot inherit these field meanings just because its stores look similar. The max-health floor remains independently recognizable. Earned talent points additionally requires a reviewed release because helper identity alone does not prove the nested allocated-rank schema. Marks can remain available when the talent helper is unrecognized, provided their native labeled record and save helpers pass. Permanent edits retain strict helper checks; save-path helpers and their literal strings must also match. These restrictions intentionally reduce coverage where meaning is unproven.
+
+Before connecting, recognized live functions and supporting code/data must agree with the checked executable, including ASLR relocations. A mismatch disables dependent capabilities; no capabilities means connection is refused. Reports include the executable hash, embedded `AzerothSurvivors/<version>` token, fields and refusal reasons. The token is informational: both archived builds report `0.2.0`. Canonically named or explicitly remembered game executables do not require that token; it helps identify renamed copies.
+
+Enabling with all options off installs no hooks. Spell-only selection installs only its rarity hook. Run actions start their tracker when requested; open **Talents and marks** to activate profile tracking and load classes. Max-health and XP hooks install only while their options are enabled.
+
+These are the verified reference builds:
 
 | Reference | SHA-256 |
 | --- | --- |
 | Original desktop layout | `0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908` |
 | Updated desktop layout | `6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa` |
 
-Runtime recognition tolerates unrelated function changes and extracts the registers/fields used by the supported patterns. It still requires recognizable operations, call conventions and record formats. Reworked logic, heavy inlining, unsupported instruction shapes or another architecture can require a trainer update. Permanent-save helpers deliberately stay strict; an unknown helper disables the affected edit.
+Runtime recognition tolerates unrelated function changes for semantically verified features and extracts the registers/fields used by supported patterns. Reviewed stat, life and banish fallbacks require their exact archived release. It still requires recognizable operations, call conventions and record formats. Reworked logic, heavy inlining, unsupported instruction shapes or another architecture can require a trainer update. Permanent-save helpers deliberately stay strict; an unknown helper disables the affected edit.
 
-Local checks cover both real builds, cross-catalog recognition in both directions, unrelated-code mutations, lost dependencies, redirected calls, bad unwind metadata, simulated live mismatches, poisoned RNG registers, backup refusal and native hook behavior. These recognizers were developed with both builds available. Cross-build and synthetic checks do not prove support for an unseen future release; genuine prediction must be measured on a new build before changing the recognizers. Verification files remain ignored.
+Local checks cover both real builds, missing debug/clock anchors, an XP-to-gold mutation, swapped stat meanings, wrong price/profile owners, conflicting gold evidence, changed save destinations, unsafe replay, short patch windows, jump-table entries into patched bytes, register liveness, poisoned RNG registers, backup refusal and native hook behavior. These recognizers were developed with both builds available. Cross-build and synthetic checks do not prove support for an unseen future release; genuine prediction must be measured on a new build before changing the recognizers. Verification files remain ignored.
 
 Run the trainer and game as the same Windows user with matching administrator privileges. Joining co-op clients cannot control the host's simulation. If the trainer is forcibly terminated while enabled, restart the game to remove its hooks.
 
@@ -147,7 +153,7 @@ Generated hooks use private scratch frames and preserve volatile registers inste
 
 ## Compatibility diagnostics
 
-The production executable includes two read-only compatibility commands. Run them from the folder containing your trainer executable:
+The production executable includes two read-only compatibility commands and an archive command. Run them from the folder containing your trainer executable:
 
 ```powershell
 Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--verify-files' -Wait
@@ -165,11 +171,20 @@ Get-Content .\trainer\game-check.txt
 
 `--verify-game` checks the running game without installing hooks. Disable other trainers first. Reports say **PASS** when every capability is available, **PARTIAL** when some remain, or **FAIL** when connecting is unsafe. Exit code 0 means a usable capability remains; 1 means verification failed; 2 means no report could be written. Reports normally use `trainer/game-check.txt`. If that folder is unwritable, they fall back to `%LOCALAPPDATA%/AzerothSurvivorsTrainer/reports`, then `%TEMP%/AzerothSurvivorsTrainer`; the path is printed to standard output. The UI performs the same checks on connection.
 
+Before changing recognizers for a newly installed release, archive its executable and record how many features the existing trainer recognizes:
+
+```powershell
+Start-Process '.\Azeroth Trainer Plus.exe' -ArgumentList '--archive-build' -Wait
+Get-Content .\trainer\game-check.txt
+```
+
+The archive stores one executable per game SHA-256 under `trainer/reference-builds`, with a recognition report named by the trainer's SHA-256. Existing reports are preserved. Pass a game directory or executable after `--archive-build` when needed. The command launches no game and changes no saves; each release copy uses approximately 150 MB. Compare this baseline with the report from the revised trainer. A release used to develop recognizers is not an unseen-version test.
+
 Compatibility checks do not establish that every option works throughout a complete run. Full live auto-pick behavior, actual profile serialization, and Armory refresh have not been verified end to end. Use the status messages and check the game's displayed values after a request.
 
 ## Profile backups and persistence
 
-Before each permanent edit, the trainer reads the running game's environment and working directory. `WOW_ROGUE_SAVE` overrides the save directory; a relative value is resolved against the game's working directory. Otherwise it uses that process's `%APPDATA%/wenilla-rogue`. The `characters.txt` file is copied to a uniquely named file in `trainer/backups`, flushed and verified byte-for-byte before a request is queued.
+Before each permanent edit, the trainer verifies the native save-destination call chain and strings, then reads the running game's environment and working directory. `WOW_ROGUE_SAVE` is the **complete save file path**, including its filename. Relative paths use the game's working directory. Without an override, the verified policy uses `%APPDATA%/wenilla-rogue/characters.txt`, then `XDG_DATA_HOME`, then `HOME/.local/share`. The effective file is copied to a unique file in `trainer/backups`, flushed and verified byte-for-byte before queuing the edit. A changed native destination disables permanent edits even if an old save still exists.
 
 Missing/unreadable saves, unresolved paths, unwritable backups or changing backup contents refuse the edit. Class IDs come from loaded talent/marks records; unknown future IDs are shown numerically. To restore, close the game and trainer, preserve the current save, and copy the chosen backup over the effective `characters.txt`. Other save files are not backed up. Rebuilding preserves backups.
 
@@ -204,6 +219,7 @@ Disable restores executable instructions. It does not undo granted XP, resources
 | `src/Game/GameImage.cs` | PE sections, runtime-function ranges, executable hashing, and ASLR relocation parsing |
 | `src/Game/GameLayout.cs` | Independent capabilities, field agreement/bounds, call checks and live validation |
 | `src/Game/RuntimeDiscovery.cs` | Runtime operation recognizers, string/call anchors, fields and registers |
+| `src/Game/RegisterFlow.cs` | Argument, register, stack-spill and pointer provenance across control flow |
 | `src/Game/DecodedCode.cs` | Iced decoding, control flow, liveness and prologue/unwind proofs |
 | `src/Game/CatalogContracts.cs` | Strict helper fingerprints and decoded patch boundaries |
 | `src/Game/BuildCatalog.cs` | Verified permanent-edit helper signatures |

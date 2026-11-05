@@ -34,13 +34,17 @@ namespace AzerothTrainer
         internal static string SavePath(IntPtr process)
         {
             string directory;var environment=EnvironmentFor(process,out directory);string root;
-            if(!environment.TryGetValue("WOW_ROGUE_SAVE",out root))
+            bool explicitFile=environment.TryGetValue("WOW_ROGUE_SAVE",out root);
+            if(!explicitFile)
             {
-                string appData;Need(environment.TryGetValue("APPDATA",out appData)&&!String.IsNullOrWhiteSpace(appData),"Cannot resolve the game's AppData save directory; the profile edit was not queued.");
-                root=Path.Combine(appData,"wenilla-rogue");
+                string directoryRoot;
+                if(!environment.TryGetValue("APPDATA",out directoryRoot)&&!environment.TryGetValue("XDG_DATA_HOME",out directoryRoot))
+                {Need(environment.TryGetValue("HOME",out directoryRoot),"Cannot resolve the game's save directory; the profile edit was not queued.");directoryRoot=Path.Combine(directoryRoot,".local","share");}
+                root=Path.Combine(directoryRoot,"wenilla-rogue","characters.txt");
             }
+            Need(!String.IsNullOrWhiteSpace(root),"The game's save path is empty; the edit was not queued.");
             if(!Path.IsPathRooted(root)){Need(Path.IsPathRooted(directory),"Cannot resolve the game's relative save directory.");root=Path.Combine(directory,root);}
-            return Path.GetFullPath(Path.Combine(root,"characters.txt"));
+            return Path.GetFullPath(root);
         }
         internal static string Create(IntPtr process)
         {
@@ -56,6 +60,11 @@ namespace AzerothTrainer
                     input.Position=0;using(var sha=SHA256.Create())using(var copied=File.OpenRead(target))
                         Need(input.Length==length&&copied.Length==length&&Native.Equal(sha.ComputeHash(input),sha.ComputeHash(copied)),"The save changed during backup. Retry the edit.");
                 }
+                // Reopen by name: an atomic save replacement can leave the
+                // original open handle readable while the path names a new file.
+                using(var current=File.Open(source,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+                using(var copied=File.OpenRead(target))using(var sha=SHA256.Create())
+                    Need(current.Length==copied.Length&&Native.Equal(sha.ComputeHash(current),sha.ComputeHash(copied)),"The save was replaced during backup. Retry the edit.");
                 return target;
             }
             catch{if(File.Exists(target))File.Delete(target);throw;}

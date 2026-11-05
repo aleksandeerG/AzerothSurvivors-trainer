@@ -28,6 +28,24 @@ namespace AzerothTrainer
             }
             catch(Exception ex){return Report("FAIL (disk): "+Failure(ex),1);}
         }
+        internal static int ArchiveBuild(string gameDirectory)
+        {
+            try
+            {
+                string source=String.IsNullOrEmpty(gameDirectory)?GameLocator.FindExecutable():GameLocator.InDirectory(gameDirectory);
+                if(source==null)throw new Exception("Game not found. Pass its executable or installation folder after --archive-build.");
+                var image=new GameImage(source);string folder=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"trainer","reference-builds",image.Hash);Directory.CreateDirectory(folder);
+                string executable=Path.Combine(folder,"AzerothSurvivors.exe");
+                if(!File.Exists(executable))File.Copy(source,executable,false);
+                if(new GameImage(executable).Hash!=image.Hash)throw new Exception("The archive copy does not match the source; the game may have updated during copying.");
+                string trainer=System.Reflection.Assembly.GetExecutingAssembly().Location,trainerHash=GameImage.Digest(File.ReadAllBytes(trainer));
+                string result;int code=0;try{var layout=GameLayout.Load(executable);result=(layout.Complete?"PASS":"PARTIAL")+Environment.NewLine+layout.Details;}catch(Exception ex){result="FAIL"+Environment.NewLine+Failure(ex);code=1;}
+                string report=Path.Combine(folder,trainerHash+".txt");
+                if(!File.Exists(report))File.WriteAllText(report,"Archived UTC: "+DateTime.UtcNow.ToString("u")+Environment.NewLine+"Game SHA-256: "+image.Hash+Environment.NewLine+"Trainer SHA-256: "+trainerHash+Environment.NewLine+result+Environment.NewLine+"Static recognition only. No game launched, hooks installed or saves changed.");
+                return Report("Archived executable: "+executable+Environment.NewLine+"Baseline recognition report: "+report+Environment.NewLine+result,code);
+            }
+            catch(Exception ex){return Report("Archive failed: "+Failure(ex),1);}
+        }
         internal static int VerifyGame()
         {
             try

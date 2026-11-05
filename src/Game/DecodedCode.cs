@@ -11,6 +11,9 @@ namespace AzerothTrainer
         internal readonly Instruction[] Instructions;
         internal readonly Dictionary<int,int> Dependencies=new Dictionary<int,int>();
         readonly Dictionary<ulong,int> indices=new Dictionary<ulong,int>();
+        readonly Dictionary<int,int[]> jumpTables=new Dictionary<int,int[]>();
+        RegisterFlow flow;
+        internal RegisterFlow Flow {get{return flow??(flow=new RegisterFlow(this));}}
         delegate InstructionInfo ReadInfo(InstructionInfoFactory factory,ref Instruction instruction);
         static readonly ReadInfo readInfo=CreateInfoReader();
         static ReadInfo CreateInfoReader()
@@ -30,6 +33,44 @@ namespace AzerothTrainer
             var result=new List<Instruction>();ulong end=(ulong)(function.Start+function.Length);
             while(decoder.IP<end){Instruction instruction;decoder.Decode(out instruction);if(instruction.IsInvalid||instruction.NextIP>end)throw new Exception("Invalid or truncated x64 instruction.");indices.Add(instruction.IP,result.Count);result.Add(instruction);}
             Instructions=result.ToArray();
+            ResolveTables();
+            if(Instructions.Count(i=>i.FlowControl==FlowControl.IndirectBranch)>jumpTables.Count){flow=new RegisterFlow(this);ResolveTables();flow=null;}
+        }
+        void ResolveTables()
+        {
+            var factory=new InstructionInfoFactory();
+            for(int at=0;at<Instructions.Length;at++)
+            {
+                var jump=Instructions[at];if(jump.FlowControl!=FlowControl.IndirectBranch||jump.Op0Kind!=OpKind.Register)continue;
+                Register target=jump.Op0Register;int load=-1;Register table=Register.None;
+                for(int p=at-1;p>=0&&p>=at-24;p--)
+                {
+                    var i=Instructions[p];if(i.Mnemonic==Mnemonic.Movsxd&&i.Op0Register==target&&i.Op1Kind==OpKind.Memory&&i.MemoryIndexScale==4&&i.MemoryBase!=Register.None){load=p;table=i.MemoryBase;break;}
+                    if(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall)break;
+                }
+                if(load<0||!Instructions.Skip(load+1).Take(at-load-1).Any(i=>i.Mnemonic==Mnemonic.Add&&i.Op0Register==target&&i.Op1Register==table))continue;
+                int address=-1;
+                for(int p=load-1;p>=0;p--)
+                {
+                    var i=Instructions[p];if(i.Mnemonic==Mnemonic.Lea&&i.Op0Register==table&&i.IsIPRelativeMemoryOperand){address=checked((int)i.IPRelativeMemoryAddress);break;}
+                    if(Info(factory,ref i).GetUsedRegisters().Any(r=>Full(r.Register)==Full(table)&&Write(r.Access)))break;
+                }
+                if(address<0&&flow!=null){var value=flow.At(load,table);if(value!=null&&value.Root==6&&value.Offset<=Int32.MaxValue)address=(int)value.Offset;}
+                if(address<0)continue;var targets=new List<int>();
+                ulong boundary=Instructions.Where(i=>i.Mnemonic==Mnemonic.Lea&&i.IsIPRelativeMemoryOperand&&i.IPRelativeMemoryAddress>(ulong)address).Select(i=>i.IPRelativeMemoryAddress).DefaultIfEmpty(UInt64.MaxValue).Min();
+                // LLVM emits contiguous signed offsets relative to the table.
+                // Include non-boundary targets here so CheckSite rejects them.
+                for(int entry=0;entry<1024;entry++)
+                {
+                    if((ulong)address+(uint)entry*4>=boundary)break;
+                    int destination;try{destination=checked(address+BitConverter.ToInt32(Image.Read(checked(address+entry*4),4),0));}catch{break;}
+                    if(destination<Function.Start||destination>=Function.Start+Function.Length)break;
+                    targets.Add(destination);
+                }
+                if(targets.Count==0||targets.Count==1024)continue;
+                Dependencies[address]=checked(targets.Count*4);
+                jumpTables[at]=targets.Distinct().ToArray();
+            }
         }
         internal int Index(ulong ip){int index;return indices.TryGetValue(ip,out index)?index:-1;}
         internal bool Calls(int target){return Instructions.Any(i=>(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&i.NearBranchTarget==(ulong)target);}
@@ -43,9 +84,39 @@ namespace AzerothTrainer
         {return operand<i.OpCount&&i.GetOpKind(operand)>=OpKind.Immediate8&&i.GetOpKind(operand)<=OpKind.Immediate32to64&&unchecked((long)i.GetImmediate(operand))==value;}
         internal static bool Read(OpAccess access){return access==OpAccess.Read||access==OpAccess.CondRead||access==OpAccess.ReadWrite||access==OpAccess.ReadCondWrite;}
         internal static bool Write(OpAccess access){return access==OpAccess.Write||access==OpAccess.ReadWrite;}
+        internal int ProbedAllocation(int index)
+        {
+            var i=Instructions[index];if(i.Mnemonic!=Mnemonic.Sub||i.Op0Register!=Register.RSP||i.Op1Register!=Register.RAX)return 0;
+            byte[] frame=Image.UnwindInfo(Function);ValidateUnwind(frame);
+            for(int slot=0;slot<frame[2];)
+            {
+                int op=frame[5+slot*2]&15,extra=frame[5+slot*2]>>4,used=op==1?(extra==0?2:3):op==4||op==8?2:op==5||op==9?3:1;
+                if(op==1&&frame[4+slot*2]==(int)i.NextIP-Function.Start)return extra==0?BitConverter.ToUInt16(frame,6+slot*2)*8:BitConverter.ToInt32(frame,6+slot*2);
+                slot+=used;
+            }
+            return 0;
+        }
+        internal bool PreservesProbeArguments(int index)
+        {
+            var call=Instructions[index];if(index+1>=Instructions.Length||call.FlowControl!=FlowControl.Call||call.Op0Kind!=OpKind.NearBranch64||ProbedAllocation(index+1)==0)return false;
+            var function=Image.FunctionAt(checked((int)call.NearBranchTarget));if(function==null||function.Start!=(int)call.NearBranchTarget||function.Length>512)return false;
+            var decoder=Decoder.Create(64,new ByteArrayCodeReader(Image.Read(function.Start,function.Length)));decoder.IP=(ulong)function.Start;var factory=new InstructionInfoFactory();
+            while(decoder.IP<(ulong)(function.Start+function.Length))
+            {
+                Instruction i;decoder.Decode(out i);if(i.IsInvalid||i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall||i.FlowControl==FlowControl.IndirectBranch)return false;
+                if((i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)&&(i.NearBranchTarget<(ulong)function.Start||i.NearBranchTarget>=(ulong)(function.Start+function.Length)))return false;
+                if(Info(factory,ref i).GetUsedRegisters().Any(r=>(Write(r.Access)||r.Access==OpAccess.CondWrite||r.Access==OpAccess.ReadCondWrite)&&new[]{Register.RAX,Register.RCX,Register.RDX,Register.R8,Register.R9}.Contains(Full(r.Register))))return false;
+            }
+            Dependencies[function.Start]=function.Length;return true;
+        }
         internal IEnumerable<int> Next(int index)
         {
             var i=Instructions[index];
+            int[] targets;if(i.FlowControl==FlowControl.IndirectBranch&&jumpTables.TryGetValue(index,out targets))
+            {
+                foreach(int target in targets){int next=Index((ulong)target);if(next<0)throw new Exception("A relative jump-table entry is not an instruction boundary.");yield return next;}
+                yield break;
+            }
             if(i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)
             {int target=Index(i.NearBranchTarget);if(target>=0)yield return target;if(i.FlowControl==FlowControl.UnconditionalBranch)yield break;}
             if(i.FlowControl==FlowControl.Return||i.FlowControl==FlowControl.Exception||i.FlowControl==FlowControl.IndirectBranch)yield break;
@@ -77,7 +148,10 @@ namespace AzerothTrainer
                         }
                     }
                     if(bits==0)continue;
-                    if(instruction.FlowControl==FlowControl.IndirectBranch)throw new Exception("Register liveness crosses an unresolved indirect branch.");
+                    if(instruction.FlowControl==FlowControl.Return&&full==Register.RAX)throw new Exception("RAX reaches a return without being overwritten.");
+                    if((instruction.FlowControl==FlowControl.UnconditionalBranch||instruction.FlowControl==FlowControl.ConditionalBranch)&&Index(instruction.NearBranchTarget)<0)
+                    {if(full!=Register.R10&&full!=Register.R11)CallDoesNotRead(instruction.NearBranchTarget,full,bits,2);if(instruction.FlowControl==FlowControl.UnconditionalBranch)continue;}
+                    if(instruction.FlowControl==FlowControl.IndirectBranch&&!jumpTables.ContainsKey(at))throw new Exception("Register liveness crosses an unresolved indirect branch.");
                     foreach(int next in Next(at))pending.Push(Tuple.Create(next,bits));
                 }
             }
@@ -106,6 +180,7 @@ namespace AzerothTrainer
                 Dependencies[(int)at]=i.Length;var info=Info(factory,ref i);
                 foreach(var use in info.GetUsedRegisters())if(Full(use.Register)==register&&Read(use.Access)&&(RegisterBits(use.Register,false)&bits)!=0)throw new Exception(register+" is an incoming callee argument at RVA 0x"+at.ToString("x")+".");
                 foreach(var use in info.GetUsedRegisters())if(Full(use.Register)==register&&Write(use.Access))bits&=~RegisterBits(use.Register,true);
+                if(i.FlowControl==FlowControl.Return&&bits!=0&&register==Register.RAX)throw new Exception("A tail callee returns the incoming RAX value.");
                 if(bits==0||i.FlowControl==FlowControl.Return)continue;
                 if(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall)
                 {
@@ -143,7 +218,7 @@ namespace AzerothTrainer
                 if(((uint)i.RflagsRead&flags)!=0)throw new Exception("Arithmetic flags are live at RVA 0x"+i.IP.ToString("x")+".");
                 flags&=~(uint)i.RflagsModified;if(flags==0)continue;
                 if(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall)continue;
-                if(i.FlowControl==FlowControl.IndirectBranch)throw new Exception("Flag liveness crosses an unresolved branch.");
+                if(i.FlowControl==FlowControl.IndirectBranch&&!jumpTables.ContainsKey(state.Item1))throw new Exception("Flag liveness crosses an unresolved branch.");
                 foreach(int next in Next(state.Item1))pending.Push(Tuple.Create(next,flags));
             }
         }
@@ -165,6 +240,10 @@ namespace AzerothTrainer
             foreach(var i in Instructions)
                 if((i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)&&i.NearBranchTarget>begin&&i.NearBranchTarget<end&&
                     !(bypassEnd>0&&i.IP>=begin&&i.IP<Instructions[bypassEnd].IP))throw new Exception("A branch outside the replaced decision tree enters patched bytes.");
+            foreach(var jump in jumpTables)foreach(int target in jump.Value)
+                if((ulong)target>begin&&(ulong)target<end)throw new Exception("A decoded jump-table target enters patched bytes.");
+            foreach(var i in Instructions.Where(i=>i.FlowControl==FlowControl.IndirectBranch))
+                if(!jumpTables.ContainsKey(Index(i.IP)))throw new Exception("Indirect jump at RVA 0x"+i.IP.ToString("x")+" has no verified relative jump table; incoming patch edges are unproven.");
             byte[] unwind=Image.UnwindInfo(Function);int prologue=unwind[1];
             if(begin<(ulong)(Function.Start+prologue))throw new Exception("The hook starts before its stack frame is complete.");
             if((unwind[0]&7)!=1||(unwind[0]&0x20)!=0)throw new Exception("Unsupported chained or versioned unwind information.");

@@ -11,14 +11,16 @@ namespace AzerothTrainer
         readonly Dictionary<string,string> invalid=new Dictionary<string,string>();
         readonly Dictionary<TrainerFeature,string> unavailable=new Dictionary<TrainerFeature,string>();
         readonly Dictionary<TrainerFeature,string[]> dependencies=new Dictionary<TrainerFeature,string[]>();
+        HashSet<TrainerFeature> trialFeatures;
         internal readonly string Hash,Name="Decoded runtime contracts";
+        readonly string version;
         internal int PriceCount {get{return discovery.PriceCount;}}
         internal int HealthRegister {get{return discovery.HealthRegister;}}
         internal int OfferStride {get{return discovery.OfferStride;}}
         internal int OfferRarity {get{return discovery.OfferRarity;}}
         GameLayout(GameImage image)
         {
-            discovery=new RuntimeDiscovery(image);Hash=image.Hash;
+            discovery=new RuntimeDiscovery(image);Hash=image.Hash;version=image.VersionToken;
             dependencies[TrainerFeature.SpellChance]=new[]{"Spell"};dependencies[TrainerFeature.ItemChance]=new[]{"Jewelry"};
             dependencies[TrainerFeature.RerollCost]=Enumerable.Range(0,PriceCount).Select(i=>"Price"+i).ToArray();
             dependencies[TrainerFeature.RunControls]=new[]{"Run"};dependencies[TrainerFeature.XpScaling]=new[]{"Xp"};
@@ -26,9 +28,9 @@ namespace AzerothTrainer
             dependencies[TrainerFeature.Gold]=new[]{"Run"};dependencies[TrainerFeature.FreeRerolls]=new[]{"Run"};dependencies[TrainerFeature.Shield]=new[]{"Run","Health"};
             dependencies[TrainerFeature.Stats]=new[]{"Run","Health"};dependencies[TrainerFeature.HealthFloor]=new[]{"Health"};
             dependencies[TrainerFeature.AutoPick]=new[]{"Run","Choose"};dependencies[TrainerFeature.XpGrant]=new[]{"Run","Xp"};
-            dependencies[TrainerFeature.ClassProgression]=new[]{"Profile","ProfileActions","EnsureClass","SaveProfile"};
-            dependencies[TrainerFeature.ClassMarks]=new[]{"Profile","ProfileActions","SaveProfile","GrowMarks","MarksRecord"};
-            dependencies[TrainerFeature.Lives]=new[]{"Run","Health","Choose"};
+            dependencies[TrainerFeature.ClassProgression]=new[]{"Profile","ProfileActions","EnsureClass","SaveProfile","WriteCharacters","CharacterPath","SaveRoot"};
+            dependencies[TrainerFeature.ClassMarks]=new[]{"Profile","ProfileActions","SaveProfile","GrowMarks","MarksRecord","WriteCharacters","CharacterPath","SaveRoot"};
+            dependencies[TrainerFeature.Lives]=new[]{"Run"};
             dependencies[TrainerFeature.CoopAutoPick]=new[]{"Run","Choose","Coop"};Evaluate();
         }
         bool Valid(string name){return discovery.Functions.ContainsKey(name)&&!invalid.ContainsKey(name);}
@@ -46,31 +48,77 @@ namespace AzerothTrainer
                     foreach(string name in dependency.Value)Need(Valid(name),name+": "+Reason(name));
                     switch(dependency.Key)
                     {
-                        case TrainerFeature.RerollCost:Need(PriceCount==5,"The complete five-path reroll calculation was not recognized. "+Reason("Prices"));break;
+                        case TrainerFeature.ItemChance:Need(discovery.ReviewedRelease||Valid("ItemBuilder"),"The native item-builder link is unavailable.");if(discovery.Functions.ContainsKey("ItemBuilder"))Need(Valid("ItemBuilder"),Reason("ItemBuilder"));break;
+                        case TrainerFeature.RerollCost:Need(PriceCount>0&&Valid("PriceAction"),"No owner-proven paid reroll action was recognized. "+Reason("Prices"));break;
                         case TrainerFeature.RunResources:Fields("hp","maxHp","phase","clock");break;
                         case TrainerFeature.Gold:Fields("hp","phase","clock","gold");break;
                         case TrainerFeature.FreeRerolls:Fields("hp","phase","clock","rerolls");break;
                         case TrainerFeature.Shield:Fields("hp","phase","clock","shield");break;
                         case TrainerFeature.Banishes:Fields("hp","phase","clock","banishes");break;
-                        case TrainerFeature.Stats:Fields("hp","phase","clock","attributes");break;
+                        case TrainerFeature.Stats:
+                            Fields("hp","phase","clock","attributes");
+                            Need(discovery.ReviewedRelease,"Stat meanings have only been reviewed for the two archived releases. A store at a relative offset does not establish its meaning; stat rows are refused on other executables.");break;
                         case TrainerFeature.HealthFloor:Fields("maxHp");break;
                         case TrainerFeature.AutoPick:Fields("hp","phase","clock","coop","offers","offerCount","offerKind");Need(OfferStride>0,"Offer element stride was not decoded.");Need(Field("offerCount")==Field("offers")+8,"Offer vector pointer/count spacing changed.");if(Valid("Health"))Edge("Choose","Health");break;
                         case TrainerFeature.CoopAutoPick:Fields("hp","phase","clock","coop","coopPhase","offers","offerCount","offerKind");Need(OfferStride>0,"Offer stride is unavailable.");Edge("Run","Coop");break;
                         case TrainerFeature.XpGrant:Fields("hp","phase","clock");Edge("Run","Xp");break;
-                        case TrainerFeature.XpScaling:Fields("xp");break;
-                        case TrainerFeature.ClassProgression:Fields("profile","talentData","talentCount");Edge("Profile","ProfileActions");Edge("ProfileActions","EnsureClass");Edge("ProfileActions","SaveProfile");break;
+                        case TrainerFeature.XpScaling:Fields("xp");Need(discovery.Fields["xp"].Keys.Any(k=>k.StartsWith("UI:")&&Valid(k)),"The native UI XP identity is unavailable.");break;
+                        case TrainerFeature.ClassProgression:
+                            Fields("profile","talentData","talentCount");Edge("Profile","ProfileActions");Edge("ProfileActions","EnsureClass");Edge("ProfileActions","SaveProfile");
+                            Need(discovery.ReviewedRelease,"The allocated-talent rank schema requires a reviewed release; helper identity alone does not establish its nested record layout.");break;
                         case TrainerFeature.ClassMarks:Fields("profile","marksCapacity","marksData","marksCount");Edge("Profile","ProfileActions");Edge("ProfileActions","SaveProfile");break;
                         case TrainerFeature.Lives:
-                            Fields("attributes");int field=StatField(0x628);
-                            Need(discovery.Functions["Choose"].Instructions.Any(i=>i.MemoryBase!=Register.RSP&&i.MemoryBase!=Register.RBP&&i.MemorySize.GetSize()==4&&unchecked((long)i.MemoryDisplacement64)==field),"Remaining-life field has no independent offer-handler witness.");break;
+                            Fields("hp","phase","clock");Need(discovery.ReviewedRelease,"The remaining-life field meaning is unproven for this executable.");Fields("lives");break;
                     }
                 }
                 catch(Exception ex){unavailable[dependency.Key]=ex.Message;}
             }
+            TrialBuilds();
+        }
+        void TrialBuilds()
+        {
+            foreach(var feature in dependencies.Keys.ToArray())
+            {
+                if(unavailable.ContainsKey(feature))continue;
+                try
+                {
+                    trialFeatures=new HashSet<TrainerFeature>{feature};if(feature==TrainerFeature.CoopAutoPick)trialFeatures.Add(TrainerFeature.AutoPick);
+                    var cave=new IntPtr(0x200000000L);var image=new IntPtr(0x140000000L);byte[] generated;
+                    if(feature==TrainerFeature.SpellChance||feature==TrainerFeature.ItemChance)
+                    {
+                        foreach(string name in feature==TrainerFeature.SpellChance?new[]{"Spell"}:new[]{"Jewelry1","Jewelry2"})
+                        {var site=Site(name);generated=RarityCode.Build(Native.Add(image,site.Continuation),Roll(name),site.TailRegister);CheckBuild(site,generated);}continue;
+                    }
+                    if(feature==TrainerFeature.RerollCost)continue;
+                    string hook=feature==TrainerFeature.HealthFloor?"HealthHook":feature==TrainerFeature.XpScaling?"XpHook":feature==TrainerFeature.ClassProgression||feature==TrainerFeature.ClassMarks?"ProfileHook":"RunHook";
+                    var context=Site(hook);IntPtr next=Native.Add(image,context.Continuation);
+                    generated=hook=="HealthHook"?HealthCode.Build(next,this):hook=="XpHook"?XpCode.Build(next,this):hook=="ProfileHook"?ProfileCode.Build(cave,next,image,this):RunCode.Build(cave,next,image,this);
+                    CheckBuild(context,generated);
+                }
+                catch(Exception ex){unavailable[feature]="Hook trial build refused: "+ex.Message;}
+                finally{trialFeatures=null;}
+            }
+            // Also build the complete combination that Apply will install.
+            try
+            {
+                if(Supports(TrainerFeature.RunControls))CheckBuild(Site("RunHook"),RunCode.Build(new IntPtr(0x200000000L),new IntPtr(0x140000000L+Site("RunHook").Continuation),new IntPtr(0x140000000L),this));
+            }
+            catch(Exception ex){foreach(var feature in dependencies.Where(p=>p.Value.Contains("Run")).Select(p=>p.Key).ToArray())unavailable[feature]="Combined run-hook trial refused: "+ex.Message;}
+            try
+            {
+                if(Supports(TrainerFeature.ClassProgression)||Supports(TrainerFeature.ClassMarks))CheckBuild(Site("ProfileHook"),ProfileCode.Build(new IntPtr(0x200000000L),new IntPtr(0x140000000L+Site("ProfileHook").Continuation),new IntPtr(0x140000000L),this));
+            }
+            catch(Exception ex){unavailable[TrainerFeature.ClassProgression]=unavailable[TrainerFeature.ClassMarks]="Combined profile-hook trial refused: "+ex.Message;}
+        }
+        void CheckBuild(HookSite site,byte[] bytes)
+        {
+            Need(bytes.Length>0&&bytes.Length<3500,"Generated hook exceeds its code allocation.");RarityCode.EntryJump(new IntPtr(0x200000000L),site.Original.Length);Need(Frame(site).Length<=96,"Generated unwind frame exceeds its allocation.");
+            var decoder=Decoder.Create(64,new ByteArrayCodeReader(bytes));
+            while(decoder.IP<(ulong)bytes.Length){Instruction instruction;decoder.Decode(out instruction);Need(!instruction.IsInvalid&&instruction.NextIP<=(ulong)bytes.Length,"The trial hook contains an invalid instruction.");}
         }
         internal static GameLayout Load(string path){var result=new GameLayout(new GameImage(path));result.RequireAny();return result;}
         void RequireAny(){if(AvailableCount>0)return;var error=new Exception("No trainer features match this game safely. Run --verify-files for detailed recognition failures.");error.Data["CompatibilityDetails"]=Details;throw error;}
-        internal bool Supports(TrainerFeature feature){return dependencies.ContainsKey(feature)&&!unavailable.ContainsKey(feature);}
+        internal bool Supports(TrainerFeature feature){return dependencies.ContainsKey(feature)&&!unavailable.ContainsKey(feature)&&(trialFeatures==null||trialFeatures.Contains(feature));}
         internal int AvailableCount {get{return dependencies.Count-unavailable.Count;}}
         internal bool Complete {get{return unavailable.Count==0;}}
         internal static string FeatureName(TrainerFeature feature)
@@ -93,6 +141,7 @@ namespace AzerothTrainer
         internal bool HasField(string name){try{Field(name);return true;}catch{return false;}}
         internal int Field(string name)
         {
+            string error;Need(!discovery.FieldErrors.TryGetValue(name,out error),error);
             Dictionary<string,int> witnesses;Need(discovery.Fields.TryGetValue(name,out witnesses),name+": no decoded field witness.");
             var live=witnesses.Where(w=>Valid(w.Key)).ToArray();Need(live.Length>0,name+": no verified field witness remains.");
             int offset=live[0].Value;Need(live.All(w=>w.Value==offset),name+": decoded field witnesses disagree ("+String.Join(", ",live.Select(w=>w.Key+"=0x"+w.Value.ToString("x")).ToArray())+").");
@@ -107,7 +156,7 @@ namespace AzerothTrainer
         }
         static bool Server(string name){return name=="profile"||name.StartsWith("marks")||name.StartsWith("talent");}
         static int Width(string name){return name=="offers"||name=="offerCount"||Server(name)?8:name=="phase"||name=="coop"||name=="coopPhase"||name=="offerKind"?1:4;}
-        internal int StatField(int reference){int relative=checked(reference-0x560);Need(relative>=0&&relative+4<=0xd0,"Unknown stat member.");return checked(Field("attributes")+relative);}
+        internal int StatField(int reference){if(reference==0x628)return Field("lives");int relative=checked(reference-0x560);Need(relative>=0&&relative+4<=0xd0,"Unknown stat member.");return checked(Field("attributes")+relative);}
         internal void ValidateLive(IntPtr handle,IntPtr imageBase)
         {
             var image=discovery.Image;long delta=imageBase.ToInt64()-image.PreferredBase;
@@ -124,7 +173,7 @@ namespace AzerothTrainer
             }
             Evaluate();RequireAny();
         }
-        internal string Summary {get{return Name+"; "+AvailableCount+"/"+dependencies.Count+" independent capabilities available; "+discovery.Functions.Count+" functions and "+discovery.Sites.Count+" sites recognized. SHA-256 "+Hash;}}
+        internal string Summary {get{return Name+"; "+AvailableCount+"/"+dependencies.Count+" independent capabilities available; "+discovery.Functions.Count+" functions and "+discovery.Sites.Count+" sites recognized. SHA-256 "+Hash+"; version token: "+version;}}
         internal string Details {get{return Summary+Environment.NewLine+String.Join(Environment.NewLine,dependencies.Keys.Select(f=>FeatureName(f)+": "+(Supports(f)?"available":"UNAVAILABLE: "+unavailable[f])).ToArray())+Environment.NewLine+"Decoded fields:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Fields.Select(f=>f.Key+": "+String.Join(", ",f.Value.Select(w=>w.Key+" +0x"+w.Value.ToString("x")+(Valid(w.Key)?"":" (unavailable)")).ToArray())).ToArray())+Environment.NewLine+"Recognition failures:"+Environment.NewLine+String.Join(Environment.NewLine,discovery.Failures.Select(f=>f.Key+": "+f.Value).ToArray());}}
     }
 }

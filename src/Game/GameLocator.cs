@@ -24,7 +24,9 @@ namespace AzerothTrainer
                         bool named=String.Equals(process.ProcessName,"AzerothSurvivors",StringComparison.OrdinalIgnoreCase)||String.Equals(process.ProcessName,expected,StringComparison.OrdinalIgnoreCase);
                         if(!named&&process.MainWindowTitle.IndexOf("Azeroth",StringComparison.OrdinalIgnoreCase)<0)continue;
                         if(process.MainModule==null)continue;
-                        if(!IsGameExecutable(process.MainModule.FileName))continue;
+                        bool canonical=String.Equals(process.ProcessName,"AzerothSurvivors",StringComparison.OrdinalIgnoreCase);
+                        bool selectedPath=remembered!=null&&String.Equals(process.MainModule.FileName,remembered,StringComparison.OrdinalIgnoreCase);
+                        if(!canonical&&!selectedPath&&!IsGameExecutable(process.MainModule.FileName))continue;
                         if(selected!=null)throw new Exception("More than one game copy is running. Close the extra copy first.");
                         selected=process;
                     }
