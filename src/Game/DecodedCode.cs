@@ -74,7 +74,34 @@ namespace AzerothTrainer
         }
         internal int Index(ulong ip){int index;return indices.TryGetValue(ip,out index)?index:-1;}
         internal bool Calls(int target){return Instructions.Any(i=>(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&i.NearBranchTarget==(ulong)target);}
+        internal bool Dominates(int candidate,params int[] targets)
+        {
+            if(candidate<0||candidate>=Instructions.Length||targets.Length==0||targets.Any(t=>t<0||t>=Instructions.Length))return false;
+            var required=new HashSet<int>(targets);var reachable=new HashSet<int>();var pending=new Stack<int>();pending.Push(0);
+            while(pending.Count>0){int at=pending.Pop();if(!reachable.Add(at))continue;foreach(int next in Next(at))pending.Push(next);}
+            if(!required.All(reachable.Contains))return false;
+            var seen=new HashSet<int>();pending.Push(0);
+            while(pending.Count>0)
+            {
+                int at=pending.Pop();if(at==candidate||!seen.Add(at))continue;if(required.Contains(at))return false;
+                if(Instructions[at].FlowControl==FlowControl.IndirectBranch&&!jumpTables.ContainsKey(at))return false;
+                foreach(int next in Next(at))pending.Push(next);
+            }
+            return true;
+        }
+        internal bool? ReachesBefore(int start,int stop,IEnumerable<int> targets)
+        {
+            if(start<0||start>=Instructions.Length)return null;var wanted=new HashSet<int>(targets);var seen=new HashSet<int>();var pending=new Stack<int>();bool unknown=false;pending.Push(start);
+            while(pending.Count>0)
+            {
+                int at=pending.Pop();if(at==stop||!seen.Add(at))continue;if(wanted.Contains(at))return true;
+                if(Instructions[at].FlowControl==FlowControl.IndirectBranch&&!jumpTables.ContainsKey(at)){unknown=true;continue;}
+                foreach(int next in Next(at))pending.Push(next);
+            }
+            return unknown?(bool?)null:false;
+        }
         internal static Register Full(Register register){return register.GetFullRegister();}
+        internal static bool Zero(Instruction i){return (i.Mnemonic==Mnemonic.Xor||i.Mnemonic==Mnemonic.Sub)&&i.Op0Kind==OpKind.Register&&i.Op1Kind==OpKind.Register&&i.Op0Register==i.Op1Register&&(i.Op0Register.GetSize()==4||i.Op0Register.GetSize()==8);}
         internal static int Xmm(Register register){return register>=Register.XMM0&&register<=Register.XMM15?(int)register-(int)Register.XMM0:-1;}
         internal static int Gpr(Register register){register=Full(register);return register>=Register.RAX&&register<=Register.R15?(int)register-(int)Register.RAX:-1;}
         internal static bool Reg(Instruction i,int operand){return operand<i.OpCount&&i.GetOpKind(operand)==OpKind.Register;}

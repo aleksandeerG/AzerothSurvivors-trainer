@@ -185,8 +185,11 @@ namespace AzerothTrainer
                 {
                     if(target.Key<section.Rva||(long)target.Key>=section.Rva+(long)section.Size)continue;
                     int at=section.Raw+target.Key-section.Rva;
+                    List<int> formats;if(result.TryGetValue(NativeText.ReferenceKey,out formats)&&NativeText.LooksLikeTemplate(bytes,at,section.Raw+section.Size-at))
+                        try{int length;var keys=NativeText.Keys(this,target.Key,out length);if(NativeText.StatLine(keys)||NativeText.RunLine(keys))formats.AddRange(target.Value);}catch{}
                     foreach(var label in result)
                     {
+                        if(label.Key==NativeText.ReferenceKey)continue;
                         if(at+label.Key.Length>section.Raw+section.Size)continue;bool match=true;
                         for(int p=0;p<label.Key.Length;p++)if(Char.ToUpperInvariant((char)bytes[at+p])!=Char.ToUpperInvariant(label.Key[p])){match=false;break;}
                         if(match)label.Value.AddRange(target.Value);

@@ -8,6 +8,15 @@ namespace AzerothTrainer
     // fixed float precision. Indexed arguments and unknown tags use HUD fallback.
     internal static class NativeText
     {
+        internal const string ReferenceKey="\0native-format";
+        internal static bool StatLine(string[] keys){int count=0;foreach(string key in keys)foreach(var row in RunStat.All)if(row.TextKey==key){count++;break;}return count>=6;}
+        internal static bool RunLine(string[] keys){int count=0;foreach(string key in keys)if(Array.IndexOf(new[]{"t","lvl","xp","hpm","sh","gold","lives","rr"},key)>=0)count++;return count>=4;}
+        internal static bool LooksLikeTemplate(byte[] bytes,int at,int available)
+        {
+            int length=bytes[at];if(length<2||length>64||length+1>available||bytes[at+length]!='=')return false;
+            for(int p=1;p<length;p++){byte c=bytes[at+p];if(c!=';'&&c!=' '&&c!='_'&&!(c>='a'&&c<='z')&&!(c>='A'&&c<='Z')&&!(c>='0'&&c<='9'))return false;}
+            return true;
+        }
         internal static bool Consumer(GameImage image,int target,DecodedCode witness)
         {
             var function=image.FunctionAt(target);if(function==null||function.Start!=target)return false;var builder=new DecodedCode(image,function);
@@ -28,7 +37,7 @@ namespace AzerothTrainer
                         {strides++;if(ins[q+1].Mnemonic!=Mnemonic.Shl||ins[q+1].Op0Register!=index||!DecodedCode.Immediate(ins[q+1],1,4))consistent=false;}
                     if(!consistent||strides!=2)continue;
                     bool load=false;for(int q=p-3;q<p;q++)if(ins[q].Mnemonic==Mnemonic.Mov&&ins[q].Op0Register==Register.RCX&&ins[q].MemoryBase==dispatch.MemoryBase&&ins[q].MemoryIndex==index&&DecodedCode.Disp(ins[q])==0)load=true;
-                    bool zero=false;foreach(var i in ins)if(i.Mnemonic==Mnemonic.Xor&&DecodedCode.Full(i.Op0Register)==DecodedCode.Full(counter)&&i.Op0Register==i.Op1Register)zero=true;
+                    bool zero=false;foreach(var i in ins)if(DecodedCode.Zero(i)&&DecodedCode.Full(i.Op0Register)==DecodedCode.Full(counter))zero=true;
                     bool increment=false;for(int q=p+1;q<=p+3;q++)if(ins[q].Mnemonic==Mnemonic.Inc&&DecodedCode.Full(ins[q].Op0Register)==DecodedCode.Full(counter))increment=true;
                     if(!load||!zero||!increment)continue;
                     witness.Dependencies[function.Start]=function.Length;witness.Dependencies[body.Start]=body.Length;return true;
@@ -53,7 +62,7 @@ namespace AzerothTrainer
                 }
                 string key=literal.Trim().TrimStart(';').Trim();
                 if(!key.EndsWith("=",StringComparison.Ordinal))throw new Exception("Native format argument has no key.");key=key.Substring(0,key.Length-1);
-                foreach(char c in key)if(!Char.IsLetterOrDigit(c))throw new Exception("Native format key is ambiguous.");
+                foreach(char c in key)if(c!='_'&&!Char.IsLetterOrDigit(c))throw new Exception("Native format key is ambiguous.");
                 if(key.Length==0||keys.Contains(key))throw new Exception("Duplicate or empty native format key.");keys.Add(key);literal="";
             }
             throw new Exception("Native format exceeds its bounded parser.");
