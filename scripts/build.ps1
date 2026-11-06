@@ -43,6 +43,7 @@ $sourceFiles = @(
     'src\Game\GameImage.cs'
     'src\Game\DecodedCode.cs'
     'src\Game\RegisterFlow.cs'
+    'src\Game\NativeText.cs'
     'src\Game\CatalogContracts.cs'
     'src\Game\RuntimeDiscovery.cs'
     'src\Game\ProfileBackup.cs'

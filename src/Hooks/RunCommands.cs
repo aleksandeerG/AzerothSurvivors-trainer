@@ -12,12 +12,12 @@ namespace AzerothTrainer
             return (status&0xffffffff00000000UL)|value;
         }
 
-        internal static void Track(Assembler a)
+        internal static void Track(Assembler a,GameLayout layout)
         {
-            // RSI = Game; RAX = data. Active states are running/offer (1/2).
+            // RSI = Game; RAX = data. Native comparisons establish both active states.
             a.Emit("F3 0F 10 86 $clock"); // movss xmm0,[rsi+clock]
-            a.Emit("44 0F B6 96 $phase 41 FF CA 41 83 FA 01"); // movzx r10d,state; dec r10d; cmp r10d,1
-            a.Branch("0F 87","commandsInactive");
+            a.Emit("44 0F B6 96 $phase 41 81 FA");a.Bytes.AddRange(BitConverter.GetBytes(layout.RunningState));a.Branch("0F 84","commandsActive");
+            a.Emit("41 81 FA");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferState));a.Branch("0F 85","commandsInactive");a.Label("commandsActive");
             a.Emit("0F 57 D2 F3 0F 10 8E $hp 0F 2E CA"); // xorps xmm2,xmm2; movss xmm1,HP; ucomiss xmm1,xmm2
             a.Branch("0F 86","commandsInactive"); // dead/NaN HP must not consume queued actions
             a.Emit("48 39 70 60");a.Branch("0F 85","commandsEpoch"); // cmp [rax+Owner],rsi

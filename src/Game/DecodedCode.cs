@@ -105,7 +105,7 @@ namespace AzerothTrainer
             {
                 Instruction i;decoder.Decode(out i);if(i.IsInvalid||i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall||i.FlowControl==FlowControl.IndirectBranch)return false;
                 if((i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)&&(i.NearBranchTarget<(ulong)function.Start||i.NearBranchTarget>=(ulong)(function.Start+function.Length)))return false;
-                if(Info(factory,ref i).GetUsedRegisters().Any(r=>(Write(r.Access)||r.Access==OpAccess.CondWrite||r.Access==OpAccess.ReadCondWrite)&&new[]{Register.RAX,Register.RCX,Register.RDX,Register.R8,Register.R9}.Contains(Full(r.Register))))return false;
+                if(Info(factory,ref i).GetUsedRegisters().Any(r=>(Write(r.Access)||r.Access==OpAccess.CondWrite||r.Access==OpAccess.ReadCondWrite)&&new[]{Register.RAX,Register.RCX,Register.RDX,Register.R8,Register.R9,Full(Register.XMM0),Full(Register.XMM1),Full(Register.XMM2),Full(Register.XMM3)}.Contains(Full(r.Register))))return false;
             }
             Dependencies[function.Start]=function.Length;return true;
         }
@@ -125,6 +125,18 @@ namespace AzerothTrainer
         internal void DeadAfter(int index,params Register[] registers)
         {DeadAfter(index,2,registers);}
         internal void RequireSingleIntegerArgument(){DeadAfter(0,16,new[]{Register.RDX,Register.R8,Register.R9});}
+        internal void RequireTwoIntegerArguments()
+        {
+            DeadAfter(0,16,new[]{Register.R8,Register.R9,Register.XMM0,Register.XMM1,Register.XMM2,Register.XMM3});
+            var factory=new InstructionInfoFactory();
+            for(int at=0;at<Instructions.Length;at++)
+            {
+                var i=Instructions[at];if(i.MemoryBase==Register.None)continue;
+                var address=Flow.At(at,i.MemoryBase);
+                if(address!=null&&address.Root==5&&address.Offset+unchecked((long)i.MemoryDisplacement64)+(i.MemoryIndex==Register.None?Math.Max(1,i.MemorySize.GetSize()):1)>40&&(i.Mnemonic==Mnemonic.Lea||Info(factory,ref i).GetUsedMemory().Any(m=>Read(m.Access))))
+                    throw new Exception("Native action reads an incoming stack argument at RVA 0x"+i.IP.ToString("x")+".");
+            }
+        }
         void DeadAfter(int index,int depth,Register[] registers)
         {
             var factory=new InstructionInfoFactory();
@@ -222,7 +234,7 @@ namespace AzerothTrainer
         }
         bool FloatingMathImport(Instruction instruction,Register register)
         {
-            if(register!=Register.RCX&&register!=Register.RDX&&register!=Register.R8&&register!=Register.R9||!instruction.IsIPRelativeMemoryOperand||instruction.IPRelativeMemoryAddress>Int32.MaxValue)return false;
+            if(register!=Register.RCX&&register!=Register.RDX&&register!=Register.R8&&register!=Register.R9&&register!=Full(Register.XMM1)&&register!=Full(Register.XMM2)&&register!=Full(Register.XMM3)||!instruction.IsIPRelativeMemoryOperand||instruction.IPRelativeMemoryAddress>Int32.MaxValue)return false;
             string name;if(!Image.Imports.TryGetValue((int)instruction.IPRelativeMemoryAddress,out name))return false;int split=name.IndexOf('!');string dll=name.Substring(0,split).ToLowerInvariant(),function=name.Substring(split+1);
             if(dll!="ucrtbase.dll"&&dll!="msvcrt.dll"&&!dll.StartsWith("api-ms-win-crt-math-l",StringComparison.Ordinal))return false;
             // These published CRT signatures take only floating arguments in

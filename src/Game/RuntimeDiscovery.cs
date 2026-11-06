@@ -18,24 +18,30 @@ namespace AzerothTrainer
         internal readonly Dictionary<string,Dictionary<string,int>> Fields=new Dictionary<string,Dictionary<string,int>>();
         internal readonly Dictionary<string,string> Failures=new Dictionary<string,string>();
         internal readonly Dictionary<string,string> FieldErrors=new Dictionary<string,string>();
+        readonly Dictionary<string,int> phaseValues=new Dictionary<string,int>();
+        internal int RunningState=-1,OfferState=-1,CoopRunningState=-1;
         readonly Dictionary<string,HashSet<int>> phaseCandidates=new Dictionary<string,HashSet<int>>();
         internal bool PricesComplete;
         internal int HealthRegister=-1,PriceCount,OfferStride,OfferRarity;
         internal bool ReviewedRelease {get{return Image.Hash=="0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908"||Image.Hash=="6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa";}}
+        readonly List<Tuple<DecodedCode,HookSite,RarityRegisters>> rollCandidates=new List<Tuple<DecodedCode,HookSite,RarityRegisters>>();
         readonly Dictionary<int,DecodedCode> cache=new Dictionary<int,DecodedCode>();
+        Dictionary<string,List<int>> labelReferences;
         internal RuntimeDiscovery(GameImage image)
         {
             Image=image;
-            Pass("Rarity",DiscoverRarity);Pass("Health",DiscoverHealth);Pass("Run",DiscoverRun);Pass("Coop",DiscoverCoop);
+            Pass("Rarity",DiscoverRarity);Pass("Health",DiscoverHealth);Pass("Native text",DiscoverNativeText);Pass("Run",DiscoverRun);Pass("Coop",DiscoverCoop);
             Pass("Xp",DiscoverXp);Pass("Choose",DiscoverChoose);Pass("Prices",DiscoverPrices);
-            foreach(string name in new[]{"gold","rerolls","banishes","level","xp"}.Concat(RunStat.All.Select(s=>s.Key).Where(k=>k!=null))){string key=name;Pass("UI "+key,()=>DiscoverUiField(key));}
+            foreach(string name in UiLabels){string key=name;Pass("UI "+key,()=>DiscoverUiField(key));}
             Pass("Profile",DiscoverProfile);ValidateRoles();ResolvePhase();cache.Clear();
+            foreach(string role in new[]{"Xp","Choose"})
+                if(Functions.ContainsKey(role))try{Functions[role].RequireTwoIntegerArguments();Functions[role+"Call"]=Functions[role];}catch(Exception ex){Failures[role+"Call"]="Native two-argument call refused: "+ex.Message;}
         }
         void Pass(string name,Action discover)
         {
             var functions=new Dictionary<string,DecodedCode>(Functions);var sites=new Dictionary<string,HookSite>(Sites);
             var fields=Fields.ToDictionary(f=>f.Key,f=>new Dictionary<string,int>(f.Value));var errors=new Dictionary<string,string>(FieldErrors);var rarity=new Dictionary<string,RarityRegisters>(Rarity);
-            var phases=phaseCandidates.ToDictionary(p=>p.Key,p=>new HashSet<int>(p.Value));bool complete=PricesComplete;
+            var states=new Dictionary<string,int>(phaseValues);var phases=phaseCandidates.ToDictionary(p=>p.Key,p=>new HashSet<int>(p.Value));bool complete=PricesComplete;
             int health=HealthRegister,prices=PriceCount,stride=OfferStride,rank=OfferRarity;
             try{discover();}
             catch(Exception ex)
@@ -44,7 +50,7 @@ namespace AzerothTrainer
                 Sites.Clear();foreach(var pair in sites)Sites.Add(pair.Key,pair.Value);
                 Fields.Clear();foreach(var pair in fields)Fields.Add(pair.Key,pair.Value);
                 FieldErrors.Clear();foreach(var pair in errors)FieldErrors.Add(pair.Key,pair.Value);
-                phaseCandidates.Clear();foreach(var pair in phases)phaseCandidates.Add(pair.Key,pair.Value);PricesComplete=complete;
+                phaseValues.Clear();foreach(var pair in states)phaseValues.Add(pair.Key,pair.Value);phaseCandidates.Clear();foreach(var pair in phases)phaseCandidates.Add(pair.Key,pair.Value);PricesComplete=complete;
                 Rarity.Clear();foreach(var pair in rarity)Rarity.Add(pair.Key,pair.Value);
                 HealthRegister=health;PriceCount=prices;OfferStride=stride;OfferRarity=rank;Failures[name]="Discovery refused: "+ex.Message;
             }
@@ -56,17 +62,65 @@ namespace AzerothTrainer
             foreach(var f in Image.Find(bytes,true).Select(r=>Image.FunctionAt(r)).Where(f=>f!=null).GroupBy(f=>f.Start).Select(g=>g.First()))
             {DecodedCode code;try{code=Decode(f);}catch{continue;}yield return code;}
         }
+        static IEnumerable<string> UiLabels {get{return new[]{"gold","rerolls","banishes","level","xp","shield","hpMax","time"}.Concat(RunStat.All.Select(s=>s.Key).Where(k=>k!=null));}}
         IEnumerable<DecodedCode> Referencing(string value)
         {
-            var targets=new HashSet<int>(Image.Find(Encoding.UTF8.GetBytes(value),false));var found=new HashSet<int>();
-            foreach(byte rex in new byte[]{0x48,0x4c})
-                foreach(int at in Image.Find(new[]{rex,(byte)0x8d},true))
+            if(labelReferences==null)labelReferences=Image.LabelReferences(UiLabels.Concat(new[]{"rerollCost","WOW_ROGUE_SINK_AT","\x03hp=","\x02t="}));
+            var found=new HashSet<int>();
+            foreach(int at in labelReferences[value])
                 {
-                    byte[] bytes;try{bytes=Image.Read(at,7);}catch{continue;}
-                    if((bytes[2]&0xc7)!=5||!targets.Contains(at+7+BitConverter.ToInt32(bytes,3)))continue;
                     var f=Image.FunctionAt(at);if(f==null||!found.Add(f.Start))continue;DecodedCode code;try{code=Decode(f);}catch{continue;}int index=code.Index((ulong)at);
                     if(index>=0&&code.Instructions[index].IsIPRelativeMemoryOperand)yield return code;
                 }
+        }
+        void DiscoverNativeText()
+        {
+            foreach(string anchor in new[]{"\x03hp=","\x02t="})foreach(var code in Referencing(anchor))
+            try
+            {
+                for(int at=0;at<code.Instructions.Length;at++)
+                {
+                    var call=code.Instructions[at];if(call.FlowControl!=FlowControl.Call||call.Op0Kind!=OpKind.NearBranch64)continue;
+                    var template=code.Flow.At(at,Register.RDX);var arguments=code.Flow.At(at,Register.R8);
+                    if(template==null||template.Root!=6||arguments==null||arguments.Root!=5)continue;
+                    int bytes;string[] keys;try{keys=NativeText.Keys(Image,(int)template.Offset,out bytes);}catch{continue;}
+                    bool stats=keys.Contains("dmg")&&keys.Contains("cm")&&keys.Contains("liv"),hud=keys.Contains("t")&&keys.Contains("hpm")&&keys.Contains("lives")&&keys.Contains("rr");
+                    if(!stats&&!hud)continue;
+                    Need(NativeText.Consumer(Image,(int)call.NearBranchTarget,code),"The native formatter does not establish sequential 16-byte argument records.");
+                    var fields=new Dictionary<string,int>();var owners=new HashSet<int>();
+                    for(int n=0;n<keys.Length;n++)
+                    {
+                        var pointer=code.Flow.FrameAt(at,arguments.Offset+n*16);var formatter=code.Flow.FrameAt(at,arguments.Offset+n*16+8);if(pointer==null)continue;
+                        var stat=stats?RunStat.All.FirstOrDefault(row=>row.TextKey==keys[n]):null;
+                        string field=stat!=null?(stat.Field==0x5c8?"maxHp":stat.Field==0x628?"lives":"stat."+(stat.Key??stat.TextKey)):hud?(keys[n]=="t"?"clock":keys[n]=="lvl"?"level":keys[n]=="xp"?"xp":keys[n]=="hpm"?"maxHp":keys[n]=="sh"?"shield":keys[n]=="gold"?"gold":keys[n]=="lives"?"lives":keys[n]=="rr"?"rerolls":null):null;
+                        if(field==null)continue;bool floating=stat!=null?stat.Kind<4:field=="clock"||field=="maxHp"||field=="shield";
+                        if(stat!=null&&stat.Kind==5)floating=false;
+                        if(stat!=null&&stat.Kind==5)
+                        {if(pointer.Root!=5)continue;pointer=code.Flow.FrameAt(at,pointer.Offset);if(pointer==null||pointer.Root<11||pointer.Root>14||pointer.Transform!=2)continue;pointer=new RegisterFlow.Value(pointer.Root-10,pointer.Offset);}
+                        if(pointer.Root<1||pointer.Root>4||pointer.Offset<0x100||pointer.Offset>=0x10000||pointer.Transform!=0||!NativeText.Formatter(Image,formatter,floating,code,stat!=null&&stat.Kind==5?8:4))continue;
+                        owners.Add(pointer.Root);fields[field]=(int)pointer.Offset;
+                    }
+                    Need(owners.Count==1&&fields.Count>=6,"Native text fields do not have one corroborated incoming owner.");
+                    string role="Text:"+(stats?"Stats:":"Run:")+code.Function.Start.ToString("x");Functions[role]=code;code.Dependencies[(int)template.Offset]=bytes;
+                    foreach(var field in fields)Field(field.Key,field.Value,role);
+                    if(stats)DiscoverStatUnits(code);
+                }
+            }
+            catch(Exception ex){Failures["Text candidate 0x"+code.Function.Start.ToString("x")]=ex.Message;}
+        }
+        void DiscoverStatUnits(DecodedCode code)
+        {
+            var scripts=Image.Find(Encoding.ASCII.GetBytes("function AZS_Pct(v)"),false).ToArray();if(scripts.Length!=1){Failures["Stat units"]="The native stat-display Lua is missing or ambiguous.";return;}
+            foreach(int address in scripts)
+            {
+                byte[] bytes;try{bytes=Image.Read(address,24000);}catch{continue;}string lua=Encoding.ASCII.GetString(bytes);
+                const string percent="return string.format(\"%+.0f%%\", v * 100);";int pct=lua.IndexOf(percent,StringComparison.Ordinal);if(pct<0)continue;
+                foreach(var stat in RunStat.All)
+                {
+                    int at=lua.IndexOf(stat.UnitExpression,StringComparison.Ordinal);if(at<0)continue;
+                    code.Dependencies[address+at]=stat.UnitExpression.Length;code.Dependencies[address+pct]=percent.Length;Functions["Units:"+stat.TextKey]=code;
+                }
+            }
         }
         static bool RR(Instruction i,Mnemonic name,Register destination,Register source)
         {return i.Mnemonic==name&&i.Op0Kind==OpKind.Register&&i.Op1Kind==OpKind.Register&&i.Op0Register==destination&&i.Op1Register==source;}
@@ -86,6 +140,13 @@ namespace AzerothTrainer
         HookSite Site(string name,DecodedCode code,int first,int last,int continuation,int guardEnd=0)
         {
             code.CheckSite(first,last,continuation,guardEnd);
+            if(name=="RunHook"||name=="XpHook")
+            {
+                code.FlagsDead(first);var factory=new InstructionInfoFactory();
+                for(int p=first;p<last;p++){var i=code.Instructions[p];Need(!DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Write(r.Access)&&(DecodedCode.Full(r.Register)==Register.RSP||DecodedCode.Full(r.Register)==Register.RBP)),"The replay window changes the native stack frame.");}
+                int prologue=code.Index((ulong)(code.Function.Start+Image.UnwindInfo(code.Function)[1]));var expected=code.Flow.At(prologue,Register.RSP);var actual=code.Flow.At(first,Register.RSP);
+                Need(expected!=null&&expected.Same(actual),"The hook no longer has its completed native stack frame.");
+            }
             int start=checked((int)code.Instructions[first].IP),end=checked((int)code.Instructions[last-1].NextIP),next=checked((int)code.Instructions[continuation].IP);
             var site=new HookSite(Image,code.Function,start,end-start,next,guardEnd==0?end-start:checked((int)code.Instructions[guardEnd].IP-start));
             if(name!="branch"&&name!="cost")
@@ -160,14 +221,38 @@ namespace AzerothTrainer
                     catch(Exception ex){if(!Failures.ContainsKey("Rarity")||!ex.Message.StartsWith("Rarity weight sum"))Failures["Rarity"]="RVA 0x"+ins[at].IP.ToString("x")+": "+ex.Message;}
                 }
             }
-            var spell=results.GroupBy(r=>r.Item1.Function.Start).Where(g=>g.Count()==1).Select(g=>g.First()).ToArray();
-            if(spell.Length==1){Functions["Spell"]=spell[0].Item1;Sites["Spell"]=spell[0].Item2;Rarity["Spell"]=spell[0].Item3;}else Failures["Spell"]="Expected one decoded spell roll; found "+spell.Length+". "+Failure("Rarity");
-            var items=results.GroupBy(r=>r.Item1.Function.Start).Where(g=>g.Count()==2).ToArray();
-            if(items.Length==1)
+            rollCandidates.AddRange(results);
+        }
+        bool SpellIterator(DecodedCode roll)
+        {
+            var ins=roll.Instructions;var factory=new InstructionInfoFactory();
+            for(int at=0;at<ins.Length;at++)
             {
-                int index=0;foreach(var item in items[0].OrderBy(r=>r.Item2.Rva)){string name="Jewelry"+(++index);Sites[name]=item.Item2;Rarity[name]=item.Item3;}Functions["Jewelry"]=items[0].First().Item1;
+                var load=ins[at];if(load.Mnemonic!=Mnemonic.Mov||load.Op1Kind!=OpKind.Memory||load.MemorySize.GetSize()!=8||DecodedCode.Disp(load)!=0x18||!roll.Flow.Argument(at,load.MemoryBase,1))continue;
+                Register owner=load.Op0Register;
+                for(int p=at+1;p<ins.Length;p++)
+                {var i=ins[p];if(i.Op1Kind==OpKind.Memory&&DecodedCode.Memory(i,owner)&&DecodedCode.Disp(i)==Known("maxHp"))return true;if(DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Full(r.Register)==owner&&DecodedCode.Write(r.Access)))break;}
             }
-            else Failures["Jewelry"]="Expected one decoded item-roll pair; found "+items.Length+". "+Failure("Rarity");
+            return false;
+        }
+        void AssignRollRoles()
+        {
+            var spells=new List<Tuple<DecodedCode,HookSite,RarityRegisters>>();var items=new List<Tuple<DecodedCode,Tuple<DecodedCode,HookSite,RarityRegisters>[]>>();
+            foreach(var group in rollCandidates.GroupBy(c=>c.Item1.Function.Start))
+            try
+            {
+                var code=group.First().Item1;if(SpellIterator(code)){spells.AddRange(group);continue;}
+                foreach(var builder in Callers(code.Function.Start))
+                    if((GameContext(builder,0)||PaymentPassesGame(builder.Function.Start))&&builder.Instructions.Any(i=>i.FlowControl==FlowControl.Call&&i.Op0Kind==OpKind.NearBranch64&&i.NearBranchTarget==(ulong)code.Function.Start&&builder.Flow.Argument(builder.Index(i.IP),Register.RDX,0)))items.Add(Tuple.Create(builder,group.ToArray()));
+            }
+            catch(Exception ex){Failures["Roll candidate 0x"+group.Key.ToString("x")]=ex.Message;}
+            if(spells.Count==1){var match=spells[0];Functions["Spell"]=match.Item1;Sites["Spell"]=match.Item2;Rarity["Spell"]=match.Item3;}else Failures["Spell"]="Iterator ownership identifies "+spells.Count+" spell roll sites.";
+            if(items.Count==1&&items[0].Item2.Length==2)
+            {
+                Functions["ItemBuilder"]=items[0].Item1;Functions["Jewelry"]=items[0].Item2[0].Item1;int index=0;
+                foreach(var match in items[0].Item2.OrderBy(c=>c.Item2.Rva)){string name="Jewelry"+(++index);Sites[name]=match.Item2;Rarity[name]=match.Item3;}
+            }
+            else Failures["Jewelry"]="Game-owned item builders: "+items.Count+"; both native roll paths must be recognized.";
             if(Functions.ContainsKey("Spell")&&Functions.ContainsKey("Jewelry"))Failures.Remove("Rarity");
         }
         string Failure(string name){string reason;return Failures.TryGetValue(name,out reason)?reason:"No matching instruction shape.";}
@@ -177,32 +262,37 @@ namespace AzerothTrainer
             Dictionary<string,int> evidence;if(!Fields.TryGetValue(name,out evidence)||evidence.Count==0)return -1;
             return evidence.Values.Distinct().Count()==1?evidence.Values.First():-1;
         }
-        void Phase(int offset,string source)
+        void Phase(int offset,string source,int value)
         {
             if(offset<0x100||offset>=0x10000)return;
-            HashSet<int> values;if(!phaseCandidates.TryGetValue(source,out values)){values=new HashSet<int>();phaseCandidates.Add(source,values);}values.Add(offset);
+            HashSet<int> values;if(!phaseCandidates.TryGetValue(source,out values)){values=new HashSet<int>();phaseCandidates.Add(source,values);}values.Add(offset);string key=source+":"+offset;int old;phaseValues[key]=phaseValues.TryGetValue(key,out old)&&old!=value?-1:value;
         }
+        static bool ByteImmediate(Instruction i){return i.OpCount>1&&i.GetOpKind(1)>=OpKind.Immediate8&&i.GetOpKind(1)<=OpKind.Immediate32to64&&i.GetImmediate(1)<=255;}
         void ResolvePhase()
         {
             var sources=phaseCandidates.Where(p=>Functions.ContainsKey(p.Key)).ToArray();
             var matches=sources.SelectMany(p=>p.Value).Distinct().Where(offset=>sources.Where(p=>p.Value.Contains(offset)).Select(p=>Functions[p.Key].Function.Start).Distinct().Count()>=2).ToArray();
             if(matches.Length!=1){Failures["phase"]="Run state needs one agreeing offset from at least two independent native handlers; found "+matches.Length+".";return;}
             foreach(var source in sources.Where(p=>p.Value.Contains(matches[0])))Field("phase",matches[0],source.Key);
+            int running;if(phaseValues.TryGetValue("Run:"+matches[0],out running))RunningState=running;
+            var offers=new[]{"Choose","PriceAction"}.Where(k=>phaseValues.ContainsKey(k+":"+matches[0])).Select(k=>phaseValues[k+":"+matches[0]]).Distinct().ToArray();
+            if(offers.Length==1)OfferState=offers[0];
         }
         bool GameContext(DecodedCode code,int argument)
         {
+            var known=new HashSet<int>(new[]{"phase","hp","maxHp","clock","offers","offerCount","offerKind","reviewedStatsBase","level","lives","gold","rerolls","xp"}.Select(Known).Where(offset=>offset>=0));
             var found=new HashSet<int>();
             for(int at=0;at<code.Instructions.Length;at++)
             {
                 var i=code.Instructions[at];if(i.MemoryBase==Register.None||i.MemoryIndex!=Register.None||!code.Flow.Argument(at,i.MemoryBase,argument))continue;
-                foreach(string name in new[]{"phase","hp","maxHp","clock","offers","offerCount","offerKind","attributes","level","lives","gold","rerolls","xp"})if(Known(name)>=0&&DecodedCode.Disp(i)==Known(name))found.Add(Known(name));
+                if(known.Contains(DecodedCode.Disp(i))&&found.Add(DecodedCode.Disp(i))&&found.Count>=2)return true;
             }
-            return found.Count>=2;
+            return false;
         }
         void DiscoverUiField(string key)
         {
             int matches=0;string reason="";
-            var candidates=Referencing(key).Concat(Referencing(Char.ToUpperInvariant(key[0])+key.Substring(1))).GroupBy(c=>c.Function.Start).Select(g=>g.First());
+            var candidates=Referencing(key);
             foreach(var code in candidates)
                 try{matches+=InspectUiField(code,key);}catch(Exception ex){reason=" Candidate 0x"+code.Function.Start.ToString("x")+": "+ex.Message;}
             Need(matches>0,"No owner-proven native UI value for '"+key+"'."+reason);
@@ -210,7 +300,7 @@ namespace AzerothTrainer
         int InspectUiField(DecodedCode code,string key)
         {
             if(!UiSiblings(code))return 0;int matches=0;var flow=code.Flow;
-            bool scalar=RunStat.All.Any(s=>s.Key==key);
+            bool stat=RunStat.All.Any(s=>s.Key==key),scalar=stat||key=="shield"||key=="hpMax"||key=="time";
             for(int at=0;at<code.Instructions.Length;at++)
             {
                 var call=code.Instructions[at];if(call.FlowControl!=FlowControl.Call)continue;
@@ -219,7 +309,7 @@ namespace AzerothTrainer
                 string text;try{text=Encoding.UTF8.GetString(Image.Read(checked((int)label.Offset),key.Length));}catch{continue;}
                 if(!String.Equals(text,key,StringComparison.OrdinalIgnoreCase)||!GameContext(code,value.Root-11))continue;
                 code.Dependencies[(int)label.Offset]=key.Length;
-                string field=scalar?"stat."+key:key,role="UI:"+field+":"+code.Function.Start.ToString("x");Functions[role]=code;Field(field,(int)value.Offset,role);matches++;
+                string field=stat?"stat."+key:key=="hpMax"?"maxHp":key=="time"?"clock":key,role="UI:"+field+":"+code.Function.Start.ToString("x");Functions[role]=code;Field(field,(int)value.Offset,role);matches++;
             }
             return matches;
         }
@@ -258,7 +348,7 @@ namespace AzerothTrainer
         {
             for(int step=0;step<4;step++)
             {
-                try{ValidateRole(step);}
+                try{if(step==2)AssignRollRoles();ValidateRole(step);}
                 catch(Exception ex)
                 {
                     string[] roles=step==0?Functions.Keys.Where(k=>k.StartsWith("Price")).ToArray():step==1?new[]{"Xp"}:step==2?new[]{"Jewelry","ItemBuilder"}:new[]{"Spell"};
@@ -266,17 +356,49 @@ namespace AzerothTrainer
                 }
             }
             try{CheckPriceDisplays();}catch(Exception ex){PricesComplete=false;Failures["Prices"]="Display price coverage is unproven: "+ex.Message;}
+            try{CheckPaidCounters();}catch(Exception ex){PricesComplete=false;Failures["Prices"]="Paid-counter coverage is unproven: "+ex.Message;}
             foreach(string field in new[]{"gold","rerolls","banishes"})
             {
                 Dictionary<string,int> witnesses;if(!Fields.TryGetValue(field,out witnesses))continue;
-                if(!ReviewedRelease||witnesses.Keys.Any(k=>k.StartsWith("UI:")))foreach(string source in witnesses.Keys.Where(k=>k.StartsWith("Price")).ToArray())witnesses.Remove(source);
+                if(!ReviewedRelease||witnesses.Keys.Any(k=>(k.StartsWith("UI:")||k.StartsWith("Text:"))))foreach(string source in witnesses.Keys.Where(k=>k.StartsWith("Price")).ToArray())witnesses.Remove(source);
             }
-            if(ReviewedRelease&&Known("attributes")>=0&&!Fields.ContainsKey("lives"))Field("lives",Known("attributes")+0xc8,"Health");
+            if(ReviewedRelease&&Known("reviewedStatsBase")>=0&&!Fields.ContainsKey("lives"))Field("lives",Known("reviewedStatsBase")+0xc8,"Health");
+        }
+        void CheckPaidCounters()
+        {
+            var covered=new HashSet<ulong>();var offsets=new HashSet<int>();
+            foreach(var entry in Functions.Where(f=>f.Key.StartsWith("Price")&&f.Key!="PriceAction"))
+            {
+                int index=Int32.Parse(entry.Key.Substring(5));var paid=PricePaid(entry.Value,entry.Value.Index((ulong)Sites["PriceBranch"+index].Rva));covered.Add(paid.IP);offsets.Add(DecodedCode.Disp(paid));
+            }
+            Need(offsets.Count==1,"Verified paid-price calculations disagree on the counter field.");int offset=offsets.First(),found=0;
+            foreach(var code in Anchored(BitConverter.GetBytes(offset)))
+            {
+                try
+                {
+                bool witness=false;
+                for(int at=0;at+2<code.Instructions.Length;at++)
+                {
+                    var load=code.Instructions[at];
+                    if(load.Mnemonic!=Mnemonic.Mov||load.Op0Kind!=OpKind.Register||load.Op0Register.GetSize()!=4||load.Op1Kind!=OpKind.Memory||load.MemoryIndex!=Register.None||load.MemorySize.GetSize()!=4||DecodedCode.Disp(load)!=offset)continue;
+                    int test=at+1;
+                    if(code.Instructions[test].Mnemonic==Mnemonic.Mov&&code.Instructions[test].Op0Register==Register.EAX&&DecodedCode.Immediate(code.Instructions[test],1,1)&&load.Op0Register!=Register.EAX)test++;
+                    if(!RR(code.Instructions[test],Mnemonic.Test,load.Op0Register,load.Op0Register))continue;
+                    var owner=code.Flow.At(at,load.MemoryBase);
+                    if(owner==null||owner.Root<1||owner.Root>4||owner.Offset!=0||!GameContext(code,owner.Root-1))continue;
+                    found++;witness=true;
+                    if(!covered.Contains(load.IP)){PricesComplete=false;Failures["Prices"]="Unpatched Game paid-counter read/test at RVA 0x"+load.IP.ToString("x")+".";}
+                }
+                if(witness)Functions["PaidCounter:"+code.Function.Start.ToString("x")]=code;
+                }
+                catch(Exception ex){Failures["Paid candidate 0x"+code.Function.Start.ToString("x")]="Owner proof unavailable: "+ex.Message;if(Functions.Any(f=>f.Key.StartsWith("Price")&&f.Value.Function.Start==code.Function.Start))PricesComplete=false;}
+            }
+            Need(found>0&&found==covered.Count,"The paid-counter paths and verified price calculations do not agree.");
         }
         void CheckPriceDisplays()
         {
             var covered=new HashSet<int>(Functions.Where(f=>f.Key.StartsWith("Price")&&f.Key!="PriceAction").Select(f=>f.Value.Function.Start));
-            foreach(var code in Referencing("rerollCost").Concat(Referencing("RerollCost")).GroupBy(c=>c.Function.Start).Select(g=>g.First()))
+            foreach(var code in Referencing("rerollCost"))
             {
                 if(!UiSiblings(code))continue;
                 bool display=false;
@@ -293,29 +415,30 @@ namespace AzerothTrainer
         {
             if(step==0)foreach(var entry in Functions.Where(e=>e.Key.StartsWith("Price")).ToArray())
             {
-                var code=entry.Value;int index=Int32.Parse(entry.Key.Substring(5));var site=Sites["PriceBranch"+index];int at=code.Index((ulong)site.Rva)-2;var paid=code.Instructions[at];
+                var code=entry.Value;int index=Int32.Parse(entry.Key.Substring(5));var site=Sites["PriceBranch"+index];int at=code.Index((ulong)site.Rva)-2;var paid=PricePaid(code,at+2);at=code.Index(paid.IP);
                 var owner=code.Flow.At(at,paid.MemoryBase);
-                if(owner==null||owner.Root<1||owner.Root>4||owner.Offset!=0||!GameContext(code,owner.Root-1)||Known("rerolls")<0||DecodedCode.Disp(paid)!=Known("rerolls")+4)
+                if(owner==null||owner.Root<1||owner.Root>4||owner.Offset!=0||!GameContext(code,owner.Root-1))
                 {Refuse(entry.Key,"The price counter is not linked to the native Game reroll fields.");continue;}
                 for(int p=0;p+3<code.Instructions.Length;p++)
                 {
                     var load=code.Instructions[p];var subtract=code.Instructions[p+1];var branch=code.Instructions[p+2];var store=code.Instructions[p+3];
-                    if(load.Mnemonic==Mnemonic.Mov&&load.Op1Kind==OpKind.Memory&&DecodedCode.Disp(load)==Known("gold")&&code.Flow.Argument(p,load.MemoryBase,owner.Root-1)&&
+                    if(load.Mnemonic==Mnemonic.Mov&&load.Op0Kind==OpKind.Register&&load.Op0Register.GetSize()==4&&load.Op1Kind==OpKind.Memory&&load.MemorySize.GetSize()==4&&DecodedCode.Disp(load)==Known("gold")&&code.Flow.Argument(p,load.MemoryBase,owner.Root-1)&&
                         subtract.Mnemonic==Mnemonic.Sub&&subtract.Op0Register==load.Op0Register&&subtract.Op1Register==code.Instructions[code.Index((ulong)Sites["PriceCost"+index].Rva)+2].Op0Register&&branch.Mnemonic==Mnemonic.Jb&&
-                        Store(store,Mnemonic.Mov,load.MemoryBase,DecodedCode.Disp(load),load.Op0Register))Functions["PriceAction"]=code;
+                        Store(store,Mnemonic.Mov,load.MemoryBase,DecodedCode.Disp(load),load.Op0Register))
+                    {Functions["PriceAction"]=code;Functions["Payment"]=code;Field("gold",DecodedCode.Disp(load),"Payment");}
                 }
             }
             if(Functions.ContainsKey("Run"))Failures.Remove("Run");
             DecodedCode xp;
             if(step==1&&Functions.TryGetValue("Xp",out xp))
             {
-                if(Known("xp")<0||!Fields["xp"].Keys.Any(k=>k.StartsWith("UI:"))||!GameContext(xp,0))
+                if(Known("xp")<0||!Fields["xp"].Keys.Any(k=>(k.StartsWith("UI:")||k.StartsWith("Text:")))||!GameContext(xp,0))
                     Refuse("Xp","XP needs matching native UI XP evidence and the same Game argument.");
             }
             if(step==0&&Functions.ContainsKey("PriceAction"))
             {
                 var action=Functions["PriceAction"];
-                foreach(var i in action.Instructions)if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&i.MemorySize.GetSize()==1&&i.MemoryIndex==Register.None&&DecodedCode.Immediate(i,1,2)&&action.Flow.Argument(action.Index(i.IP),i.MemoryBase,0))Phase(DecodedCode.Disp(i),"PriceAction");
+                foreach(var i in action.Instructions)if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&i.MemorySize.GetSize()==1&&i.MemoryIndex==Register.None&&ByteImmediate(i)&&action.Flow.Argument(action.Index(i.IP),i.MemoryBase,0))Phase(DecodedCode.Disp(i),"PriceAction",(int)i.GetImmediate(1));
             }
             // A roll count only nominates a role. Its owner must also match the
             // native spell iterator or the direct Game item-generation context.
@@ -352,105 +475,132 @@ namespace AzerothTrainer
         }
         void DiscoverHealth()
         {
-            var candidates=new List<Tuple<DecodedCode,int,int,int,int>>();
+            var candidates=new List<Tuple<DecodedCode,int,int,int,int>>();var factory=new InstructionInfoFactory();
             foreach(var code in Anchored(new byte[]{0x0f,0x5c}))
             {
                 var ins=code.Instructions;
-                for(int at=1;at+3<ins.Length;at++)
+                for(int at=1;at<ins.Length;at++)
                 {
                     var sub=ins[at];if(sub.Mnemonic!=Mnemonic.Subss||sub.Op1Kind!=OpKind.Memory||sub.MemoryIndex!=Register.None||sub.MemoryBase==Register.RSP||sub.MemoryBase==Register.RBP||sub.MemoryBase==Register.RIP)continue;
-                    Register delta=sub.Op0Register,owner=sub.MemoryBase;int field=DecodedCode.Disp(sub);
-                    if(ins[at-1].Mnemonic!=Mnemonic.Movaps||ins[at-1].Op0Register!=delta||!DecodedCode.Reg(ins[at-1],1))continue;Register maximum=ins[at-1].Op1Register;
-                    var add=ins[at+1];
-                    if(add.Mnemonic!=Mnemonic.Addss||add.Op0Kind!=OpKind.Register||add.Op1Kind!=OpKind.Register||DecodedCode.Xmm(add.Op0Register)<0||DecodedCode.Xmm(add.Op1Register)<0||add.Op0Register==delta||add.Op0Register==maximum||!Store(ins[at+2],Mnemonic.Movss,owner,field,maximum))continue;
+                    Register delta=sub.Op0Register,owner=sub.MemoryBase;int field=DecodedCode.Disp(sub),copy=-1;
+                    for(int p=at-1;p>=Math.Max(0,at-10);p--)
+                    {
+                        var i=ins[p];if(i.FlowControl!=FlowControl.Next)break;
+                        if(!DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Full(r.Register)==DecodedCode.Full(delta)&&DecodedCode.Write(r.Access)))continue;
+                        if(i.Mnemonic==Mnemonic.Movaps&&i.Op0Register==delta&&DecodedCode.Reg(i,1))copy=p;break;
+                    }
+                    if(copy<0)continue;Register maximum=ins[copy].Op1Register;int store=-1;
+                    for(int p=at+1;p<Math.Min(ins.Length,at+10);p++)
+                    {
+                        var i=ins[p];if(Store(i,Mnemonic.Movss,owner,field,maximum)){store=p;break;}
+                        if(i.FlowControl!=FlowControl.Next||DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Full(r.Register)==DecodedCode.Full(maximum)&&DecodedCode.Write(r.Access)))break;
+                    }
+                    if(store<0||delta==maximum||DecodedCode.Xmm(delta)<0||DecodedCode.Xmm(maximum)<0)continue;
+                    bool changed=false;for(int p=copy+1;p<at;p++){var i=ins[p];if(DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Full(r.Register)==DecodedCode.Full(maximum)&&DecodedCode.Write(r.Access)))changed=true;}if(changed)continue;
                     try
                     {
-                        int first=at-1,last=at+2;code.DeadAfter(first,Register.RAX);Site("HealthHook",code,first,last,last);
-                        Need(code.Flow.Argument(first,owner,0),"Health recalculation is not owned by its Game argument.");
-                        Need(field>=0x168&&field<0x10000&&(field&3)==0,"Maximum-health field is out of range.");
-                        // The HP operation is independent of the other stat rows.
-                        // Relative stores cannot prove the meanings of those rows.
+                        if(!code.Flow.Argument(at,owner,0))continue;
+                        Need(field>=0x100&&field<0x10000&&(field&3)==0,"Maximum-health field is out of range.");
                         var current=new HashSet<int>();
-                        for(int p=at+3;p<ins.Length;p++)if(ins[p].Mnemonic==Mnemonic.Minss&&ins[p].Op1Register==maximum)
-                            for(int q=Math.Max(at+2,p-15);q<p;q++)
+                        for(int p=store+1;p<ins.Length;p++)if(ins[p].Mnemonic==Mnemonic.Minss&&ins[p].Op1Register==maximum)
+                            for(int q=Math.Max(store,p-15);q<p;q++)
                             {
                                 var load=ins[q];if(load.Mnemonic!=Mnemonic.Movss||load.Op1Kind!=OpKind.Memory||!DecodedCode.Memory(load,owner,4)||!code.Flow.Argument(q,owner,0))continue;
                                 bool update=ins.Skip(q+1).Take(p-q-1).Any(i=>Store(i,Mnemonic.Movss,owner,DecodedCode.Disp(load),load.Op0Register));
-                                bool deltaApplied=ins.Skip(q+1).Take(p-q-1).Any(i=>RR(i,Mnemonic.Addss,load.Op0Register,delta));
+                                bool applied=ins.Skip(q+1).Take(p-q-1).Any(i=>RR(i,Mnemonic.Addss,load.Op0Register,delta));
                                 bool copied=ins[p].Op0Register==load.Op0Register||ins.Skip(q+1).Take(p-q-1).Any(i=>RR(i,Mnemonic.Movaps,ins[p].Op0Register,load.Op0Register));
-                                if(update&&deltaApplied&&copied)current.Add(DecodedCode.Disp(load));
+                                if(update&&applied&&copied)current.Add(DecodedCode.Disp(load));
                             }
-                        Need(current.Count==1,"Maximum-health delta and clamp do not identify one current-HP field.");candidates.Add(Tuple.Create(code,first,last,DecodedCode.Xmm(maximum),current.First()));
+                        Need(current.Count==1,"Maximum-health delta and clamp do not identify one current-HP field.");candidates.Add(Tuple.Create(code,copy,store,DecodedCode.Xmm(maximum),current.First()));
                     }
-                    catch(Exception ex){Failures["Health"]=ex.Message;}
+                    catch(Exception ex){Failures["Health candidate 0x"+sub.IP.ToString("x")]=ex.Message;}
                 }
             }
-            if(candidates.Count!=1){Failures["Health"]="Expected one stat recalculation; found "+candidates.Count+". "+Failure("Health");return;}
-            var match=candidates[0];Functions["Health"]=match.Item1;Sites["HealthHook"]=Site("HealthHook",match.Item1,match.Item2,match.Item3,match.Item3);HealthRegister=match.Item4;
-            var body=match.Item1.Instructions;var maximumOperand=body[match.Item2+1];int hp=match.Item5;
-            Field("hp",hp,"Health");Field("maxHp",DecodedCode.Disp(maximumOperand),"Health");
-            if(ReviewedRelease)Field("attributes",DecodedCode.Disp(maximumOperand)-0x68,"Health");
-            for(int p=match.Item3;p+1<body.Length;p++)
-            {
-                var load=body[p];if(load.Mnemonic!=Mnemonic.Movss||load.Op1Kind!=OpKind.Memory||!DecodedCode.Memory(load,maximumOperand.MemoryBase,4)||DecodedCode.Disp(load)!=hp+4)continue;
-                var natural=body[p+1];if(natural.Mnemonic!=Mnemonic.Movss||!DecodedCode.Memory(natural,maximumOperand.MemoryBase,4)||DecodedCode.Disp(natural)!=hp+8)continue;
-                if(body.Skip(p+2).Take(35).Any(i=>Store(i,Mnemonic.Movss,maximumOperand.MemoryBase,DecodedCode.Disp(load),load.Op0Register)))Field("shield",DecodedCode.Disp(load),"Health");
-            }
+            if(candidates.Count!=1){Failures["Health"]="Expected one semantic stat recalculation; found "+candidates.Count+".";return;}
+            var match=candidates[0];Functions["Health"]=match.Item1;HealthRegister=match.Item4;var storeInstruction=match.Item1.Instructions[match.Item3];
+            Field("hp",match.Item5,"Health");Field("maxHp",DecodedCode.Disp(storeInstruction),"Health");
+            if(ReviewedRelease)Field("reviewedStatsBase",DecodedCode.Disp(storeInstruction)-0x68,"Health");
+            try{int last=Cover(match.Item1,match.Item2,12);match.Item1.DeadAfter(match.Item2,Register.RAX);Sites["HealthHook"]=Site("HealthHook",match.Item1,match.Item2,last,last);}
+            catch(Exception ex){Failures["HealthHook"]="Health fields recognized; floor patch refused: "+ex.Message;}
         }
+        internal int RunOwnerRegister=1,RunTimeRegister=1;
         void DiscoverRun()
         {
-            var candidates=new List<Tuple<DecodedCode,int>>();
-            foreach(var code in Referencing("WOW_ROGUE_SINK_AT").Concat(Anchored(new byte[]{0x80,0xb9})).GroupBy(c=>c.Function.Start).Select(g=>g.First()))
+            var anchored=Referencing("WOW_ROGUE_SINK_AT").ToArray();var candidates=new List<DecodedCode>();
+            foreach(var code in (anchored.Length>0?anchored.AsEnumerable():Anchored(new byte[]{0x80,0xb9})))
+            try
             {
                 var ins=code.Instructions;
-                for(int at=0;at+3<ins.Length;at++)
-                {
-                    if(ins[at].Mnemonic!=Mnemonic.Movaps||ins[at].Op1Register!=Register.XMM1||!Nonvolatile(ins[at].Op0Register)||ins[at+1].Mnemonic!=Mnemonic.Mov||ins[at+1].Op1Register!=Register.RCX||ins[at+1].Op0Kind!=OpKind.Register)continue;
-                    if(ins[at+2].Mnemonic!=Mnemonic.Cmp||!DecodedCode.Memory(ins[at+2],Register.RCX,1)||!DecodedCode.Immediate(ins[at+2],1,0)||ins[at+3].FlowControl!=FlowControl.ConditionalBranch)continue;
-                    try
-                    {
-                        Register owner=ins[at+1].Op0Register,deltaTime=ins[at].Op0Register;
-                        Need(code.Flow.Argument(at,Register.RCX,0),"Run owner is not its Game argument.");
-                        bool time=ins.Any(i=>i.Mnemonic==Mnemonic.Addss&&i.Op1Register==deltaTime);
-                        bool health=Known("maxHp")>=0&&ins.Any(i=>i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Memory(i,owner,4)&&DecodedCode.Disp(i)==Known("maxHp"));
-                        Need((time||health)&&ins.Any(i=>i.Mnemonic==Mnemonic.Movzx&&DecodedCode.Memory(i,owner,1)),"Run time/state witnesses are missing.");
-                        code.DeadAfter(at,Register.RAX);Site("RunHook",code,at,at+3,at+3);candidates.Add(Tuple.Create(code,at));
-                    }catch(Exception ex){Failures["Run"]=ex.Message;}
-                }
+                bool owner=ins.TakeWhile(i=>i.IP<(ulong)(code.Function.Start+512)).Any(i=>i.Mnemonic==Mnemonic.Mov&&i.Op0Kind==OpKind.Register&&i.Op1Register==Register.RCX);
+                if(!owner)continue;
+                bool coop=Enumerable.Range(0,ins.Length).Any(p=>IsCoopDispatch(code,p));if(!coop)continue;
+                bool time=ins.Any(i=>i.Mnemonic==Mnemonic.Addss&&i.Op1Kind==OpKind.Register&&IsFrameTime(code.Flow.At(code.Index(i.IP),i.Op1Register)));
+                if(owner&&time&&coop)candidates.Add(code);
             }
-            if(candidates.Count!=1){Failures["Run"]="Run string/context selected "+candidates.Count+" candidates. "+Failure("Run");return;}
-            var match=candidates[0];var list=match.Item1.Instructions;int first=match.Item2;Register game=list[first+1].Op0Register,dt=list[first].Op0Register;
-            Functions["Run"]=match.Item1;Sites["RunHook"]=Site("RunHook",match.Item1,first,first+3,first+3);Field("coop",DecodedCode.Disp(list[first+2]),"Run");
-            for(int p=first+3;p+3<list.Length;p++)
+            catch(Exception ex){Failures["Run candidate 0x"+code.Function.Start.ToString("x")]=ex.Message;}
+            var preferred=candidates.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)candidates=preferred.ToList();
+            if(candidates.Count!=1){Failures["Run"]="Semantic run candidates: "+candidates.Count+". "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
+            var run=candidates[0];var list=run.Instructions;Functions["Run"]=run;var healingTargets=new HashSet<int>();
+            for(int p=0;p<list.Length;p++)
             {
-                var i=list[p];
-                if(!match.Item1.Flow.Argument(p,game,0))continue;
-                if(i.Mnemonic==Mnemonic.Movzx&&i.Op1Kind==OpKind.Memory&&DecodedCode.Memory(i,game,1)&&list[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(list[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&DecodedCode.Immediate(list[p+1],1,1))Phase(DecodedCode.Disp(i),"Run");
-                if(i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Memory(i,game)&&RR(list[p+1],Mnemonic.Addss,i.Op0Register,dt)&&Store(list[p+2],Mnemonic.Movss,game,DecodedCode.Disp(i),i.Op0Register))Field("clock",DecodedCode.Disp(i),"Run");
-                int hp=Known("hp"),maximum=Known("maxHp");
-                if(i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Memory(i,game)&&(maximum<0||DecodedCode.Disp(i)==maximum)&&Store(list[p+1],Mnemonic.Movss,game,hp>=0?hp:DecodedCode.Disp(i)-0x60,i.Op0Register))
-                {Field("maxHp",DecodedCode.Disp(i),"Run");Field("hp",DecodedCode.Disp(list[p+1]),"Run");}
+                var i=list[p];if(!run.Flow.Argument(p,i.MemoryBase,0))continue;
+                if(IsCoopDispatch(run,p))Field("coop",DecodedCode.Disp(i),"Run");
+                if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movzx&&i.MemorySize.GetSize()==1&&list[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(list[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&ByteImmediate(list[p+1]))Phase(DecodedCode.Disp(i),"Run",(int)list[p+1].GetImmediate(1));
+                if(p+2<list.Length&&i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&list[p+1].Mnemonic==Mnemonic.Addss&&list[p+1].Op0Register==i.Op0Register&&IsFrameTime(run.Flow.At(p+1,list[p+1].Op1Register))&&Store(list[p+2],Mnemonic.Movss,i.MemoryBase,DecodedCode.Disp(i),i.Op0Register))Field("clock",DecodedCode.Disp(i),"Run");
+                if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Disp(i)==Known("maxHp")&&Store(list[p+1],Mnemonic.Movss,i.MemoryBase,DecodedCode.Disp(list[p+1]),i.Op0Register)&&DecodedCode.Disp(list[p+1])!=Known("maxHp"))healingTargets.Add(DecodedCode.Disp(list[p+1]));
             }
+            if(healingTargets.Count==1)Field("hp",healingTargets.First(),"Run");
+            var errors=new List<string>();
+            for(int first=0;first<list.Length&&list[first].IP<(ulong)(run.Function.Start+512);first++)
+            {
+                int game=Enumerable.Range(1,15).FirstOrDefault(r=>run.Flow.Argument(first,(Register)((int)Register.RAX+r),0));
+                if(!run.Flow.Argument(first,(Register)((int)Register.RAX+game),0))continue;
+                int dt=list.Where(i=>i.Mnemonic==Mnemonic.Addss&&i.Op1Kind==OpKind.Register&&IsFrameTime(run.Flow.At(run.Index(i.IP),i.Op1Register))).Select(i=>DecodedCode.Xmm(i.Op1Register)).Concat(new[]{1}).FirstOrDefault(r=>r>=0&&IsFrameTime(run.Flow.At(first,(Register)((int)Register.XMM0+r))));if(!IsFrameTime(run.Flow.At(first,(Register)((int)Register.XMM0+dt))))continue;
+                try{int last=Cover(run,first,12);run.DeadAfter(first,Register.RAX);var site=Site("RunHook",run,first,last,last);Sites["RunHook"]=site;RunOwnerRegister=game;RunTimeRegister=dt;return;}
+                catch(Exception ex){errors.Add("0x"+list[first].IP.ToString("x")+": "+ex.Message);}
+            }
+            Failures["RunHook"]="Run fields recognized, but no safe window with Game/frame-time provenance: "+String.Join("; ",errors.Take(8).ToArray());
         }
+        static bool IsCoopDispatch(DecodedCode code,int at)
+        {
+            var ins=code.Instructions;var i=ins[at];
+            if(at+1>=ins.Length||i.Mnemonic!=Mnemonic.Cmp||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||!DecodedCode.Immediate(i,1,0)||i.IP>=(ulong)(code.Function.Start+512))return false;
+            int branch=at+1;while(branch<Math.Min(ins.Length,at+6)&&ins[branch].FlowControl==FlowControl.Next&&ins[branch].RflagsModified==0)branch++;
+            if(branch>=ins.Length||ins[branch].FlowControl!=FlowControl.ConditionalBranch)return false;
+            ulong target=ins[branch].NearBranchTarget;
+            return ins.Skip(branch+1).TakeWhile(x=>x.IP<target).Any(x=>x.FlowControl==FlowControl.UnconditionalBranch&&x.Op0Kind==OpKind.NearBranch64&&(x.NearBranchTarget<(ulong)code.Function.Start||x.NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length)))&&code.Flow.Argument(at,i.MemoryBase,0);
+        }
+        static bool IsFrameTime(RegisterFlow.Value value){return value!=null&&value.Root==8&&value.Offset==1;}
         void DiscoverXp()
         {
-            var candidates=new List<Tuple<DecodedCode,int>>();
-            // Argument capture and an integer award added back to its own field.
+            var candidates=new List<Tuple<DecodedCode,int,int>>();
             foreach(var f in Image.Functions.Where(f=>f.Length>100&&f.Length<16000))
             {
                 byte[] prefix=Image.Read(f.Start,Math.Min(f.Length,256));bool possible=false;
                 for(int p=0;p+1<prefix.Length;p++)if(prefix[p]==0x89&&(prefix[p+1]&0xf8)==0xd0){possible=true;break;}
                 if(!possible)continue;DecodedCode code;try{code=Decode(f);}catch{continue;}var ins=code.Instructions;
-                for(int at=0;at+3<ins.Length&&ins[at].IP<(ulong)(f.Start+256);at++)
+                for(int at=0;at+1<ins.Length&&ins[at].IP<(ulong)(f.Start+512);at++)
                 {
-                    var award=ins[at];if(award.Mnemonic!=Mnemonic.Mov||award.Op0Kind!=OpKind.Register||award.Op1Register!=Register.EDX||award.Op0Register.GetSize()!=4)continue;
-                    if(ins[at+1].Mnemonic!=Mnemonic.Mov||ins[at+1].Op1Register!=Register.RCX||ins[at+1].Op0Kind!=OpKind.Register)continue;
-                    var add=ins[at+2];if(add.Mnemonic!=Mnemonic.Add||add.Op0Register!=award.Op0Register||add.Op1Kind!=OpKind.Memory||!DecodedCode.Memory(add,Register.RCX,4)||!Store(ins[at+3],Mnemonic.Mov,Register.RCX,DecodedCode.Disp(add),award.Op0Register)||DecodedCode.Disp(add)<0x100)continue;
-                    try{code.DeadAfter(at,Register.RAX);Site("XpHook",code,at,at+4,at+4);candidates.Add(Tuple.Create(code,at));}catch(Exception ex){Failures["Xp"]=ex.Message;}
+                    var add=ins[at];if(add.Mnemonic!=Mnemonic.Add||add.Op0Kind!=OpKind.Register||add.Op0Register.GetSize()!=4||add.Op1Kind!=OpKind.Memory||add.MemorySize.GetSize()!=4||add.MemoryIndex!=Register.None)continue;
+                    int stored=-1;for(int p=at+1;p<Math.Min(ins.Length,at+7);p++){var i=ins[p];if(Store(i,Mnemonic.Mov,add.MemoryBase,DecodedCode.Disp(add),add.Op0Register)){stored=p;break;}if(i.FlowControl!=FlowControl.Next||i.Mnemonic!=Mnemonic.Mov&&i.Mnemonic!=Mnemonic.Nop||i.Op0Kind==OpKind.Register&&(DecodedCode.Full(i.Op0Register)==DecodedCode.Full(add.Op0Register)||i.Op0Register==add.MemoryBase))break;}if(stored<0)continue;
+                    try
+                    {
+                        var award=code.Flow.At(at,add.Op0Register);if(award==null||!(award.Root==9&&award.Offset==1||award.Root==2&&award.Offset==0)||!code.Flow.Argument(at,add.MemoryBase,0))continue;
+                        int capture=-1;for(int p=0;p<at;p++)if(ins[p].Mnemonic==Mnemonic.Mov&&ins[p].Op0Register==add.Op0Register&&ins[p].Op1Register==Register.EDX)capture=p;
+                        if(capture>=0)candidates.Add(Tuple.Create(code,capture,at));
+                    }
+                    catch(Exception ex){Failures["Xp candidate 0x"+f.Start.ToString("x")]=ex.Message;}
                 }
             }
-            if(candidates.Count!=1){Failures["Xp"]="Expected one XP award entry; found "+candidates.Count+". "+Failure("Xp");return;}
-            var match=candidates[0];Functions["Xp"]=match.Item1;Sites["XpHook"]=Site("XpHook",match.Item1,match.Item2,match.Item2+4,match.Item2+4);Field("xp",DecodedCode.Disp(match.Item1.Instructions[match.Item2+2]),"Xp");
+            if(candidates.Count!=1){Failures["Xp"]="Expected one semantic XP award entry; found "+candidates.Count+".";return;}
+            var match=candidates[0];Functions["Xp"]=match.Item1;Field("xp",DecodedCode.Disp(match.Item1.Instructions[match.Item3]),"Xp");
+            for(int first=match.Item2;first>=0;first--)
+            {
+                if(!match.Item1.Flow.Argument(first,Register.RCX,0))continue;
+                var award=match.Item1.Flow.At(first,Register.RDX);if(award==null||!(award.Root==2&&award.Offset==0||award.Root==9&&award.Offset==1))continue;
+                try{int last=Cover(match.Item1,first,12);match.Item1.DeadAfter(first,Register.RAX);Sites["XpHook"]=Site("XpHook",match.Item1,first,last,last);return;}
+                catch(Exception ex){Failures["XpHook"]="XP award identified; multiplier patch refused: "+ex.Message;}
+            }
         }
         void DiscoverCoop()
         {
@@ -465,7 +615,7 @@ namespace AzerothTrainer
                     if(ins[at].Mnemonic!=Mnemonic.Movaps||ins[at].Op1Register!=Register.XMM1||ins[at+1].Mnemonic!=Mnemonic.Mov||ins[at+1].Op1Register!=Register.RCX||ins[at+2].Mnemonic!=Mnemonic.Movss)continue;
                     var state=ins[at+3];if(state.Mnemonic!=Mnemonic.Movzx||state.Op0Register!=Register.EAX||!DecodedCode.Memory(state,Register.RCX,1)||!RR(ins[at+4],Mnemonic.Test,Register.AL,Register.AL))continue;
                     int offset=DecodedCode.Disp(state);Register owner=ins[at+1].Op0Register;
-                    bool running=false;for(int p=0;p+1<ins.Length;p++)if(ins[p].Mnemonic==Mnemonic.Movzx&&DecodedCode.Memory(ins[p],owner,1)&&DecodedCode.Disp(ins[p])==offset&&ins[p+1].Mnemonic==Mnemonic.Cmp&&ins[p+1].Op0Register==Register.AL&&DecodedCode.Immediate(ins[p+1],1,1))running=true;
+                    bool running=false;for(int p=0;p+1<ins.Length;p++)if(ins[p].Mnemonic==Mnemonic.Movzx&&DecodedCode.Memory(ins[p],owner,1)&&DecodedCode.Disp(ins[p])==offset&&ins[p+1].Mnemonic==Mnemonic.Cmp&&ins[p+1].Op0Register==Register.AL&&ByteImmediate(ins[p+1])){running=true;CoopRunningState=(int)ins[p+1].GetImmediate(1);}
                     if(!running)continue;
                     Functions["Coop"]=code;Field("coopPhase",offset,"Coop");
                     Register deltaTime=ins[at].Op0Register;
@@ -486,7 +636,7 @@ namespace AzerothTrainer
                 var ins=code.Instructions;
                 for(int at=0;at+10<ins.Length&&ins[at].IP<(ulong)(code.Function.Start+256);at++)
                 {
-                    if(ins[at].Mnemonic!=Mnemonic.Cmp||!DecodedCode.Memory(ins[at],Register.RCX,1)||!DecodedCode.Immediate(ins[at],1,2)||ins[at+1].Mnemonic!=Mnemonic.Jne)continue;
+                    if(ins[at].Mnemonic!=Mnemonic.Cmp||!DecodedCode.Memory(ins[at],Register.RCX,1)||!ByteImmediate(ins[at])||ins[at+1].Mnemonic!=Mnemonic.Jne)continue;
                     if(ins[at+2].Mnemonic!=Mnemonic.Cmp||ins[at+2].Op0Register!=Register.RDX||!DecodedCode.Memory(ins[at+2],Register.RCX,8)||ins[at+3].Mnemonic!=Mnemonic.Jae||ins[at+1].NearBranchTarget!=ins[at+3].NearBranchTarget)continue;
                     if(ins[at+4].Mnemonic!=Mnemonic.Movzx||!DecodedCode.Memory(ins[at+4],Register.RCX,1))continue;
                     int compare=at+5;if(ins[compare].Mnemonic==Mnemonic.Mov&&ins[compare].Op0Kind==OpKind.Memory&&ins[compare].MemoryBase==Register.RBP&&ins[compare].Op1Register==Register.AL)compare++;
@@ -496,14 +646,17 @@ namespace AzerothTrainer
             }
             if(candidates.Count!=1){Failures["Choose"]="Offer phase/bounds/type checks selected "+candidates.Count+" functions.";return;}
             var match=candidates[0];var list=match.Item1.Instructions;int first=match.Item2;
-            Functions["Choose"]=match.Item1;Phase(DecodedCode.Disp(list[first]),"Choose");Field("offerCount",DecodedCode.Disp(list[first+2]),"Choose");Field("offerKind",DecodedCode.Disp(list[first+4]),"Choose");
+            Functions["Choose"]=match.Item1;Phase(DecodedCode.Disp(list[first]),"Choose",(int)list[first].GetImmediate(1));Field("offerCount",DecodedCode.Disp(list[first+2]),"Choose");Field("offerKind",DecodedCode.Disp(list[first+4]),"Choose");
             for(int p=first+7;p+3<Math.Min(list.Length,first+18);p++)
             {
                 var load=list[p];if(load.Mnemonic!=Mnemonic.Mov||load.Op0Kind!=OpKind.Register||load.Op1Kind!=OpKind.Memory||!DecodedCode.Memory(load,Register.RCX,8))continue;
                 int address=p+1;if(list[address].Mnemonic==Mnemonic.Mov&&list[address].Op1Register==Register.RCX)address++;
                 var lea=list[address];var shift=list[address+1];
-                if(lea.Mnemonic!=Mnemonic.Lea||lea.MemoryBase!=Register.RDX||lea.MemoryIndex!=Register.RDX||shift.Mnemonic!=Mnemonic.Shl||shift.Op0Register!=lea.Op0Register||shift.Op1Kind!=OpKind.Immediate8||shift.Immediate8>10)continue;
-                int stride=checked((1+lea.MemoryIndexScale)<<shift.Immediate8);Need(stride>=8&&stride<=4096&&(stride&7)==0,"Offer stride is not a bounded, aligned record.");
+                int stride;
+                if(lea.Mnemonic==Mnemonic.Imul&&lea.Op0Kind==OpKind.Register&&((lea.OpCount==3&&lea.Op1Register==Register.RDX)||(lea.OpCount==2&&lea.Op0Register==Register.RDX)))stride=checked((int)lea.GetImmediate(lea.OpCount-1));
+                else if(lea.Mnemonic==Mnemonic.Lea&&lea.MemoryBase==Register.RDX&&lea.MemoryIndex==Register.RDX&&shift.Mnemonic==Mnemonic.Shl&&shift.Op0Register==lea.Op0Register&&shift.Op1Kind==OpKind.Immediate8&&shift.Immediate8<=10)stride=checked((1+lea.MemoryIndexScale)<<shift.Immediate8);
+                else{Field("offers",DecodedCode.Disp(load),"Choose");continue;}
+                Need(stride>=8&&stride<=4096&&(stride&7)==0,"Offer stride is not a bounded, aligned record.");
                 Field("offers",DecodedCode.Disp(load),"Choose");Need(OfferStride==0||OfferStride==stride,"Conflicting offer strides.");OfferStride=stride;
             }
             // Rarity is the final four-byte value written by the roll result into
@@ -527,22 +680,33 @@ namespace AzerothTrainer
                 }
             }
         }
+        static Instruction PricePaid(DecodedCode code,int test)
+        {
+            var ins=code.Instructions;
+            for(int p=Math.Max(0,test-3);p<test;p++)
+                if(ins[p].Mnemonic==Mnemonic.Mov&&ins[p].Op1Kind==OpKind.Memory&&ins[p].MemorySize.GetSize()==4&&Enumerable.Range(p+1,test-p).Any(q=>RR(ins[q],Mnemonic.Test,ins[p].Op0Register,ins[p].Op0Register)))return ins[p];
+            return default(Instruction);
+        }
         void DiscoverPrices()
         {
             var candidates=new List<Tuple<DecodedCode,int,int>>();
-            bool mapped=true;var hosts=new HashSet<int>();foreach(int at in Image.Find(BitConverter.GetBytes(0x0290d741),true)){var function=Image.FunctionAt(at);if(function!=null)hosts.Add(function.Start);else mapped=false;}
-            foreach(var code in Anchored(BitConverter.GetBytes(0x0290d741)))
+            var codes=Referencing("rerollCost").Concat(Anchored(BitConverter.GetBytes(0x0290d741))).GroupBy(c=>c.Function.Start).Select(g=>g.First()).ToList();var seen=new HashSet<int>(codes.Select(c=>c.Function.Start));var counters=new HashSet<int>();
+            for(int cursor=0;cursor<codes.Count;cursor++)
             {
+                var code=codes[cursor];
                 var ins=code.Instructions;
                 for(int at=1;at+8<ins.Length;at++)
                 {
-                    if(ins[at].Mnemonic!=Mnemonic.Mov||!DecodedCode.Immediate(ins[at],1,1)||ins[at].Op0Register!=Register.EAX||ins[at-1].Mnemonic!=Mnemonic.Mov||ins[at-1].Op1Kind!=OpKind.Memory||ins[at-1].MemorySize.GetSize()!=4||ins[at-1].Op0Register.GetSize()!=4||ins[at+1].Mnemonic!=Mnemonic.Test||ins[at+1].Op0Register!=ins[at-1].Op0Register||ins[at+1].Op1Register!=ins[at-1].Op0Register||ins[at+2].Mnemonic!=Mnemonic.Je)continue;
+                    if(ins[at+2].Mnemonic!=Mnemonic.Je)continue;
+                    var prefix=ins.Skip(at-1).Take(3).ToArray();
+                    var loads=prefix.Where(i=>i.Mnemonic==Mnemonic.Mov&&i.Op1Kind==OpKind.Memory&&i.MemorySize.GetSize()==4&&i.Op0Kind==OpKind.Register&&i.Op0Register.GetSize()==4).ToArray();
+                    var initials=prefix.Where(i=>i.Mnemonic==Mnemonic.Mov&&i.Op0Register==Register.EAX&&DecodedCode.Immediate(i,1,1)).ToArray();
+                    if(loads.Length!=1||initials.Length!=1||loads[0].Op0Register==Register.EAX||!prefix.Any(i=>RR(i,Mnemonic.Test,loads[0].Op0Register,loads[0].Op0Register)&&i.IP>loads[0].IP)||ins[at+2].Mnemonic!=Mnemonic.Je)continue;
                     int end=code.Index(ins[at+2].NearBranchTarget);if(end<at+3||end>at+75)continue;
                     var cost=ins[end];if(cost.Mnemonic!=Mnemonic.Mov||cost.Op0Kind!=OpKind.Register||cost.Op0Register.GetSize()!=4||cost.Op1Kind!=OpKind.Immediate32||cost.Immediate32>1000000||cost.Length<5||ins[end+1].Mnemonic!=Mnemonic.Mul||ins[end+1].Op0Register!=cost.Op0Register)continue;
                     try
                     {
-                        Need(ins.Skip(at).Take(end-at).Any(i=>i.Mnemonic==Mnemonic.Mov&&DecodedCode.Immediate(i,1,0x0290d741)),"Reroll exponentiation constant changed.");
-                        int last=Cover(code,at+1,5);Site("branch",code,at+1,last,end);Site("cost",code,end,end+1,end+1);
+                        int last=Cover(code,at+2,5);Site("branch",code,at+2,last,end);Site("cost",code,end,end+1,end+1);
                         Need(!ins.Skip(at+3).Take(end-at-3).Any(i=>i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall),"Reroll calculation has side effects.");
                         Need(ins[end+2].Mnemonic==Mnemonic.Mov&&ins[end+2].Op0Kind==OpKind.Register&&ins[end+2].Op0Register.GetSize()==4&&ins[end+2].Op1Register==Register.EAX&&ins[end+3].Mnemonic==Mnemonic.Seto,"Reroll result/overflow publication changed.");
                         var factory=new InstructionInfoFactory();var modified=new HashSet<Register>();
@@ -555,21 +719,19 @@ namespace AzerothTrainer
                         // Only overwritten temporaries need a liveness proof. Some
                         // paths preserve the paid counter for its later increment.
                         code.DeadAfter(end,modified.ToArray());
-                        candidates.Add(Tuple.Create(code,at+1,end));
+                        candidates.Add(Tuple.Create(code,at+2,end));
+                        int offset=DecodedCode.Disp(loads[0]);var owner=code.Flow.At(code.Index(loads[0].IP),loads[0].MemoryBase);
+                        if(owner!=null&&owner.Root>=1&&owner.Root<=4&&owner.Offset==0&&GameContext(code,owner.Root-1)&&counters.Add(offset))foreach(var other in Anchored(BitConverter.GetBytes(offset)))if(seen.Add(other.Function.Start))codes.Add(other);
                     }
                     catch(Exception ex){Failures["Prices"]=ex.Message;}
                 }
             }
             if(candidates.Count==0){Failures["Prices"]="No verified reroll calculation. "+Failure("Prices");return;}
-            PricesComplete=mapped&&hosts.SetEquals(candidates.Select(c=>c.Item1.Function.Start));
-            foreach(var group in candidates.GroupBy(c=>c.Item1.Function.Start))
-                foreach(var instruction in group.First().Item1.Instructions.Where(i=>i.OpCount>1&&DecodedCode.Immediate(i,1,0x0290d741)))
-                    if(!group.Any(c=>instruction.IP>=c.Item1.Instructions[c.Item2].IP&&instruction.IP<c.Item1.Instructions[c.Item3].IP))PricesComplete=false;
-            if(!PricesComplete)Failures["Prices"]="At least one function or calculation containing the reroll constant is unrecognized; partial fixed pricing is refused.";
+            PricesComplete=true;
             foreach(var match in candidates.OrderBy(c=>c.Item1.Function.Start))
             {
                 int index=PriceCount++;string name="Price"+index;Functions[name]=match.Item1;Sites["PriceBranch"+index]=Site("branch",match.Item1,match.Item2,Cover(match.Item1,match.Item2,5),match.Item3);Sites["PriceCost"+index]=Site("cost",match.Item1,match.Item3,match.Item3+1,match.Item3+1);
-                var ins=match.Item1.Instructions;var paid=ins[match.Item2-2];Register owner=paid.MemoryBase,price=ins[match.Item3+2].Op0Register;
+                var ins=match.Item1.Instructions;var paid=PricePaid(match.Item1,match.Item2);Register owner=paid.MemoryBase,price=ins[match.Item3+2].Op0Register;
                 foreach(var compare in ins.Skip(match.Item3+1).Take(14))
                     if(compare.Mnemonic==Mnemonic.Cmp&&compare.Op0Kind==OpKind.Memory&&DecodedCode.Memory(compare,owner,4)&&compare.Op1Register==price)Field("gold",DecodedCode.Disp(compare),name);
                 for(int p=Math.Max(0,match.Item2-12);p+2<match.Item2-2;p++)

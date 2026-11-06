@@ -13,10 +13,10 @@ namespace AzerothTrainer
             // Roots 1..4 are entry RCX/RDX/R8/R9, 5 is the frame, 6 an
             // image literal, 7 an integer constant, and 11..14 an object field
             // read through the corresponding entry argument. Offset is bytes.
-            internal readonly int Root;internal readonly long Offset;internal readonly bool Floating;
-            internal Value(int root,long offset=0,bool floating=false){Root=root;Offset=offset;Floating=floating;}
-            internal Value Add(long offset){return new Value(Root,checked(Offset+offset),Floating);}
-            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating;}
+            internal readonly int Root,Transform;internal readonly long Offset;internal readonly bool Floating;
+            internal Value(int root,long offset=0,bool floating=false,int transform=0){Root=root;Offset=offset;Floating=floating;Transform=transform;}
+            internal Value Add(long offset){return new Value(Root,checked(Offset+offset),Floating,Transform);}
+            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating&&Transform==other.Transform;}
         }
         sealed class State
         {
@@ -51,6 +51,7 @@ namespace AzerothTrainer
             before=new State[code.Instructions.Length];var entry=new State();
             entry.Registers[DecodedCode.Gpr(Register.RCX)]=new Value(1);entry.Registers[DecodedCode.Gpr(Register.RDX)]=new Value(2);
             entry.Registers[DecodedCode.Gpr(Register.R8)]=new Value(3);entry.Registers[DecodedCode.Gpr(Register.R9)]=new Value(4);entry.Registers[DecodedCode.Gpr(Register.RSP)]=new Value(5);
+            for(int n=0;n<4;n++)entry.Scalars[n]=new Value(8,n,true);
             before[0]=entry;var pending=new Queue<int>();var queued=new HashSet<int>();pending.Enqueue(0);queued.Add(0);var factory=new InstructionInfoFactory();int budget=0;
             while(pending.Count>0)
             {
@@ -62,7 +63,7 @@ namespace AzerothTrainer
                 {
                     if(i.Mnemonic==Mnemonic.Mov&&(i.Op0Register.GetSize()==8||i.Op0Register.GetSize()==4))
                     {
-                        if(i.Op1Kind==OpKind.Register){result=Get(state,i.Op1Register);if(result!=null&&i.Op0Register.GetSize()==4&&result.Root<7)result=null;}
+                        if(i.Op1Kind==OpKind.Register){result=Get(state,i.Op1Register);if(result!=null&&i.Op0Register.GetSize()==4&&result.Root<7)result=result.Root>=1&&result.Root<=4?new Value(9,result.Root-1):null;}
                         else if(i.Op1Kind==OpKind.Memory)
                         {
                             result=Load(state,i,false);
@@ -73,6 +74,12 @@ namespace AzerothTrainer
                     if((i.Mnemonic==Mnemonic.Add||i.Mnemonic==Mnemonic.Sub)&&i.Op1Kind!=OpKind.Register&&i.Op1Kind!=OpKind.Memory)
                     {Value old=Get(state,i.Op0Register);if(old!=null&&old.Root<11)result=old.Add((i.Mnemonic==Mnemonic.Sub?-1:1)*unchecked((long)i.GetImmediate(1)));}
                     if(i.Mnemonic==Mnemonic.Mov&&i.Op0Register.GetSize()==4&&i.Op1Kind==OpKind.Immediate32)result=new Value(7,i.Immediate32);
+                    if(i.Mnemonic==Mnemonic.Cmovb&&at>=2&&i.Op1Kind==OpKind.Register)
+                    {
+                        var limit=Get(state,i.Op0Register);var source=Get(state,i.Op1Register);var compare=code.Instructions[at-2];
+                        if(limit!=null&&limit.Root==7&&limit.Offset==3&&source!=null&&source.Root>=11&&source.Root<=14&&source.Transform==0&&compare.Mnemonic==Mnemonic.Cmp&&compare.Op0Register==i.Op1Register&&DecodedCode.Immediate(compare,1,3)&&code.Instructions[at-1].Mnemonic==Mnemonic.Mov&&code.Instructions[at-1].Op0Register==i.Op0Register&&DecodedCode.Immediate(code.Instructions[at-1],1,3))result=new Value(source.Root,source.Offset,false,1);
+                    }
+                    if(i.Mnemonic==Mnemonic.Inc){var source=Get(state,i.Op0Register);if(source!=null&&source.Transform==1)result=new Value(source.Root,source.Offset,false,2);}
                 }
                 Value scalarResult=null;
                 if(vector>=0&&(i.Mnemonic==Mnemonic.Movss||i.Mnemonic==Mnemonic.Movaps||i.Mnemonic==Mnemonic.Movups))
@@ -115,6 +122,8 @@ namespace AzerothTrainer
             }
         }
         internal Value At(int index,Register register){return index>=0&&index<before.Length&&before[index]!=null?Get(before[index],register):null;}
+        internal Value FrameAt(int index,long offset)
+        {Value value;return index>=0&&index<before.Length&&before[index]!=null&&before[index].Stack.TryGetValue(offset,out value)?value:null;}
         internal bool Argument(int index,Register register,int argument,long offset=0){Value value=At(index,register);return value!=null&&value.Root==argument+1&&value.Offset==offset;}
         internal Value StackAt(int index,long offset)
         {

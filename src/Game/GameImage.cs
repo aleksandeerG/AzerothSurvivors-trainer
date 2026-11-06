@@ -164,6 +164,37 @@ namespace AzerothTrainer
             while(lo<=hi){int mid=lo+(hi-lo)/2;var f=Functions[mid];if(rva<f.Start)hi=mid-1;else if(rva>=f.Start+f.Length)lo=mid+1;else return f;}
             return null;
         }
+        internal Dictionary<string,List<int>> LabelReferences(IEnumerable<string> labels)
+        {
+            var result=new Dictionary<string,List<int>>(StringComparer.OrdinalIgnoreCase);
+            foreach(string label in labels)if(!result.ContainsKey(label))result.Add(label,new List<int>());
+            var targets=new Dictionary<int,List<int>>();
+            foreach(var section in sections)
+            {
+                if((section.Flags&0x20000000)==0)continue;
+                for(int at=section.Raw;at+7<=section.Raw+section.Size;at++)
+                {
+                    if((bytes[at]!=0x48&&bytes[at]!=0x4c)||bytes[at+1]!=0x8d||(bytes[at+2]&0xc7)!=5)continue;
+                    int source=section.Rva+at-section.Raw;long target=(long)source+7+BitConverter.ToInt32(bytes,at+3);
+                    if(target<0||target>Int32.MaxValue)continue;
+                    List<int> references;if(!targets.TryGetValue((int)target,out references)){references=new List<int>();targets.Add((int)target,references);}references.Add(source);
+                }
+            }
+            foreach(var target in targets)
+                foreach(var section in sections)
+                {
+                    if(target.Key<section.Rva||(long)target.Key>=section.Rva+(long)section.Size)continue;
+                    int at=section.Raw+target.Key-section.Rva;
+                    foreach(var label in result)
+                    {
+                        if(at+label.Key.Length>section.Raw+section.Size)continue;bool match=true;
+                        for(int p=0;p<label.Key.Length;p++)if(Char.ToUpperInvariant((char)bytes[at+p])!=Char.ToUpperInvariant(label.Key[p])){match=false;break;}
+                        if(match)label.Value.AddRange(target.Value);
+                    }
+                    break;
+                }
+            return result;
+        }
         internal IEnumerable<int> Find(byte[] needle,bool executable)
         {
             if(needle.Length==0)yield break;

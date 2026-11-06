@@ -13,7 +13,7 @@ namespace AzerothTrainer
         readonly CheckBox spellOn=new CheckBox(),itemOn=new CheckBox(),fixedCost=new CheckBox(),unlimitedBan=new CheckBox(),unlimitedReroll=new CheckBox(),autoHeal=new CheckBox(),speedOn=new CheckBox(),xpOn=new CheckBox(),autoSpell=new CheckBox(),autoItem=new CheckBox();
         readonly ComboBox resourceKind=new ComboBox(),classKind=new ComboBox(),spellRule=new ComboBox(),itemRule=new ComboBox();
         readonly DataGridView stats=new DataGridView();
-        readonly Label status=new Label(),resourceHelp=new Label(),compatibility=new Label();readonly Timer timer=new Timer();readonly ToolTip compatibilityTip=new ToolTip();
+        readonly Label status=new Label(),resourceHelp=new Label(),compatibility=new Label(),autoPickStatus=new Label();readonly Timer timer=new Timer();readonly ToolTip compatibilityTip=new ToolTip();
         readonly Button enable=new Button(),apply=new Button(),disable=new Button();
         readonly Dictionary<Control,TrainerFeature> connectedFeatures=new Dictionary<Control,TrainerFeature>();
         Button resourceAction;
@@ -58,16 +58,17 @@ namespace AzerothTrainer
             Label(profile.Controls,"Class to edit",18,21,210,27,null);classKind.SetBounds(235,19,280,30);ComboStyle(classKind);
             classKind.Items.Add("Connect to load classes");classKind.SelectedIndex=0;profile.Controls.Add(classKind);
             Label(profile.Controls,"Earned talent points",18,83,250,27,null);Number(profile.Controls,talents,281,80,125,0,51,51,0,1);
-            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");talentPending=session.SetTalentPoints(SelectedClass(),(int)talents.Value);ProfileQueued("Class talent points");},true,TrainerFeature.ClassProgression);
+            Button(profile.Controls,"Set talent points",430,77,250,delegate{if(talentPending!=0)throw new Exception("Wait for the pending talent edit to finish.");int id=SelectedClass();if(!ConfirmPermanentEdit("talent points",talents.Value,id))return;talentPending=session.SetTalentPoints(id,(int)talents.Value,true);ProfileQueued("Class talent points");},true,TrainerFeature.ClassProgression);
             Label(profile.Controls,"Class marks",18,143,250,27,null);Number(profile.Controls,marks,281,140,125,0,1000000,1000,1,0.1m);
-            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");marksPending=session.SetMarks(SelectedClass(),(int)(marks.Value*10));ProfileQueued("Class marks");},true,TrainerFeature.ClassMarks);
+            Button(profile.Controls,"Set marks",430,137,250,delegate{if(marksPending!=0)throw new Exception("Wait for the pending marks edit to finish.");int id=SelectedClass();if(!ConfirmPermanentEdit("marks",marks.Value,id))return;marksPending=session.SetMarks(id,(int)(marks.Value*10),true);ProfileQueued("Class marks");},true,TrainerFeature.ClassMarks);
             Label(profile.Controls,"Permanent changes; backups are saved in trainer\\backups.\nRespec before lowering points. Reopen the Armory to refresh.\nMarks still require normal unlocks.",18,206,660,156,new Font("Segoe UI",9));
             Check(automation.Controls,autoSpell,"Auto-pick spell offers",18,21,290,false);
             spellRule.SetBounds(333,21,345,30);ComboStyle(spellRule);spellRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(spellRule);spellRule.SelectedIndex=4;
             Check(automation.Controls,autoItem,"Auto-pick in-run item offers",18,78,310,false);
             itemRule.SetBounds(333,78,345,30);ComboStyle(itemRule);itemRule.Items.AddRange(AutoPickCode.Rules);automation.Controls.Add(itemRule);itemRule.SelectedIndex=4;
             Label(automation.Controls,"Wait before each automatic pick",18,147,340,28,null);Number(automation.Controls,pickDelay,398,144,130,0,10,0.5m,1,0.1m);Label(automation.Controls,"seconds",543,147,130,28,null);
-            Label(automation.Controls,"Picks can learn spells or replace gear. Ties choose the leftmost card.\nMissing slots use the last card. Delay uses real time.\nClick Apply options after changes.",18,208,660,163,new Font("Segoe UI",9));
+            Label(automation.Controls,"Picks can learn spells or replace gear. Ties choose the leftmost card.\nMissing slots use the last card. Delay uses real time.\nSupports hands of 1-3 cards. Click Apply options after changes.",18,208,660,100,new Font("Segoe UI",9));
+            autoPickStatus.SetBounds(18,320,660,45);autoPickStatus.ForeColor=Color.FromArgb(255,192,90);automation.Controls.Add(autoPickStatus);
             BuildStats(statTab);
             BindSwitch(spellOn,spell);BindSwitch(itemOn,item);BindSwitch(fixedCost,cost);BindSwitch(speedOn,speed);BindSwitch(xpOn,xp);BindSwitch(autoSpell,spellRule);BindSwitch(autoItem,itemRule);
             Button(Controls,"Launch game",20,497,160,LaunchGame,false);
@@ -105,6 +106,7 @@ namespace AzerothTrainer
                 if(session!=null&&session.Exited){session.Dispose();session=null;}
                 if(session==null)session=await Task.Run(delegate{return PatchSession.Attach();});
                 ApplyCompatibility();options=Options();
+                if(!session.StatUnitsVerified&&Array.Exists(options.StatEnabled,v=>v)&&MessageBox.Show(this,"The native UI does not establish every available stat's units. Stat minimums may produce a different value than shown. Apply these minimums?","Unverified stat units",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)!=DialogResult.Yes){status.Text="Stat minimums were not applied.";return;}
                 await Task.Run(delegate{session.Apply(options);if(profileSelected&&(session.Supports(TrainerFeature.ClassProgression)||session.Supports(TrainerFeature.ClassMarks)))session.PrepareProfile();});status.ForeColor=Color.FromArgb(255,192,90);status.Text=ActiveSummary(options);
             }
             catch(Exception ex){status.ForeColor=Color.LightCoral;status.Text=FailureStatus(session!=null&&session.Enabled);ShowError(ex);}
@@ -147,6 +149,7 @@ namespace AzerothTrainer
                 int code=session.TalentResult(talentPending);if(code!=0){talentPending=0;status.Text=code==1?"Class talent points updated. Reopen the Armory to refresh.":(code==2?"Talent change refused: respec this class before lowering below its allocated points.":"Talent change failed: class record unavailable.");}
             }
             if(marksPending!=0&&session.MarksResult(marksPending)==1){marksPending=0;status.Text="Class marks updated. Reopen the Armory to refresh.";}
+            int unsupported=session.UnsupportedAutoPickCount;autoPickStatus.Text=unsupported>3?"Auto-pick paused: "+unsupported+" cards. This trainer supports hands of 1-3 cards.":"";
         }
         void ResourceLimits()
         {
@@ -198,8 +201,14 @@ namespace AzerothTrainer
             if(input!=null)input.Enabled=available&&box.Checked;
             compatibilityTip.SetToolTip(box,available?"":"Unavailable for this game build. This feature needs a trainer update.");
         }
+        bool ConfirmPermanentEdit(string kind,decimal value,int classId)
+        {
+            if(session.ReviewedRelease)return true;
+            return MessageBox.Show(this,"This build has not been reviewed. Set class "+classId+" to "+value+" "+kind+" permanently?\n\nMarks are encoded in tenths; this build's units have not been verified. The saved value may differ from the requested amount. A verified backup is required before queuing the edit.","Permanent edit on an unreviewed build",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)==DialogResult.Yes;
+        }
         void ApplyCompatibility()
         {
+            if(session==null||!session.Enabled)autoPickStatus.Text="";
             FeatureSwitch(spellOn,spell,TrainerFeature.SpellChance);FeatureSwitch(itemOn,item,TrainerFeature.ItemChance);FeatureSwitch(fixedCost,cost,TrainerFeature.RerollCost);
             FeatureSwitch(unlimitedBan,null,TrainerFeature.Banishes);FeatureSwitch(unlimitedReroll,null,TrainerFeature.FreeRerolls);FeatureSwitch(autoHeal,null,TrainerFeature.RunResources);
             FeatureSwitch(speedOn,speed,TrainerFeature.RunControls);FeatureSwitch(xpOn,xp,TrainerFeature.XpScaling);
@@ -212,7 +221,7 @@ namespace AzerothTrainer
             resourceKind.Enabled=Available(TrainerFeature.Gold)||Available(TrainerFeature.FreeRerolls)||Available(TrainerFeature.Shield)||Available(TrainerFeature.Banishes)||Available(TrainerFeature.XpGrant);resource.Enabled=Available(resourceFeature);
             advance.Enabled=Available(TrainerFeature.RunResources);pickDelay.Enabled=Available(TrainerFeature.AutoPick);
             classKind.Enabled=Available(TrainerFeature.ClassProgression)||Available(TrainerFeature.ClassMarks);talents.Enabled=Available(TrainerFeature.ClassProgression);marks.Enabled=Available(TrainerFeature.ClassMarks);
-            compatibility.Text=session!=null&&session.UnavailableFeatures.Length!=0?"Unavailable for this build: "+session.UnavailableFeatures:"";
+            compatibility.Text=session==null?"":"Stat rows: "+session.AvailableStatCount+"/"+RunStat.All.Length+" available. "+(session.StatUnitsVerified?"":"Units unverified. ")+(session.UnavailableFeatures.Length==0?"":"Unavailable: "+session.UnavailableFeatures);
             compatibilityTip.SetToolTip(compatibility,compatibility.Text);
         }
         void UpdateButtons()

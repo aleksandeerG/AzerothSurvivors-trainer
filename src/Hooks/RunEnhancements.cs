@@ -5,22 +5,34 @@ namespace AzerothTrainer
     {
         internal readonly string Name,Unit;internal readonly int Field,Kind;internal readonly double Min,Max,Default;
         internal string Key {get{switch(Field){case 0x5cc:return "damage";case 0x5d0:return "cooldown";case 0x5d4:return "crit";case 0x5dc:return "speed";case 0x5e0:return "pickup";case 0x5e8:return "armor";case 0x5f0:return "regen";default:return null;}}}
+        internal string TextKey {get{switch(Field){case 0x5c8:return "hp";case 0x5cc:return "dmg";case 0x5d0:return "cd";case 0x5d4:return "crit";case 0x5d8:return "cm";case 0x5e8:return "arm";case 0x5f4:return "area";case 0x600:return "cnt";case 0x604:return "echo";case 0x5dc:return "spd";case 0x5f0:return "reg";case 0x5e0:return "pick";case 0x628:return "liv";case 0x5e4:return "xp";case 0x5fc:return "gold";case 0x5f8:return "luck";case 0x60c:return "bp";case 0x610:return "dots";case 0x614:return "doth";case 0x608:return "heal";default:throw new Exception("Unknown native stat key.");}}}
+        internal string UnitExpression
+        {
+            get
+            {
+                if(Kind==1)return "AZS_Pct(s."+TextKey+" - 1)";
+                if(Kind==2)return TextKey=="luck"||TextKey=="bp"||TextKey=="doth"?"AZS_Pct(s."+TextKey+")":"s."+TextKey+" * 100";
+                if(Kind==3)return "AZS_Pct(1 - s.cd)";
+                if(Kind>=4)return "string.format(\""+(TextKey=="cnt"?"+%d":"%d")+"\", s."+TextKey+")";
+                return "string.format(\""+(TextKey=="reg"?"%.1f":TextKey=="pick"?"%.0f yd":"%.0f")+"\", s."+TextKey+")";
+            }
+        }
         // Kind: 0 raw float, 1 percent bonus on a base of one, 2 fraction,
-        // 3 haste (reciprocal cooldown), 4 integer, 5 total DOT stacks (base one).
+        // 3 cooldown reduction, 4 integer, 5 total DOT stacks (base one).
         internal RunStat(string name,string unit,int field,int kind,double min,double max,double value)
         {Name=name;Unit=unit;Field=field;Kind=kind;Min=min;Max=max;Default=value;}
         internal uint Bits(double value)
         {
             if(Double.IsNaN(value)||Double.IsInfinity(value)||value<Min||value>Max||(Kind>=4&&value!=Math.Floor(value)))throw new ArgumentOutOfRangeException(Name);
             if(Kind>=4)return (uint)(Kind==5?value-1:value);
-            float raw=(float)(Kind==1?1+value/100:(Kind==2?value/100:(Kind==3?1/(1+value/100):value)));
+            float raw=(float)(Kind==1?1+value/100:(Kind==2?value/100:(Kind==3?1-value/100:value)));
             return BitConverter.ToUInt32(BitConverter.GetBytes(raw),0);
         }
         internal const int DataOffset=128,Stride=8;
         internal static readonly RunStat[] All={
             new RunStat("Maximum health","HP",0x5c8,0,1,1000000,2500),
             new RunStat("Damage bonus","%",0x5cc,1,0,10000,500),
-            new RunStat("Haste bonus","%",0x5d0,3,0,1000,100),
+            new RunStat("Haste (cooldown reduction)","% reduction",0x5d0,3,0,100,50),
             new RunStat("Critical chance","%",0x5d4,2,0,100,100),
             new RunStat("Critical damage","% total",0x5d8,2,100,5000,300),
             new RunStat("Armor","% reduction",0x5e8,2,0,60,60),
@@ -65,19 +77,22 @@ namespace AzerothTrainer
     }
     internal static class AutoPickCode
     {
-        internal const int SpellMode=56,ItemMode=60,Owner=64,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92,Fingerprint=384;
+        internal const int SpellMode=56,ItemMode=60,Owner=64,Elapsed=76,Delay=80,Random=84,Count=88,MaxDelta=92,Fingerprint=384,UnsupportedCount=392;
         internal static readonly string[] Rules={"Left card","Middle card","Right card","Random card","Highest rarity (leftmost tie)"};
         internal static void Emit(Assembler a,IntPtr start,IntPtr image,GameLayout layout)
         {
-            a.Emit("80 BE $phase 02");a.Branch("0F 85","autoReset");
+            a.Emit("C7 80 88 01 00 00 00 00 00 00"); // clear the previous hand's refusal
+            a.Emit("80 BE $phase");a.Bytes.Add((byte)layout.OfferState);a.Branch("0F 85","autoReset");
             a.Emit("80 BE $coop 00");
-            if(layout.Supports(TrainerFeature.CoopAutoPick)){a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase 01");a.Branch("0F 85","autoReset");a.Label("autoLive");}
+            if(layout.Supports(TrainerFeature.CoopAutoPick)){a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase");a.Bytes.Add((byte)layout.CoopRunningState);a.Branch("0F 85","autoReset");a.Label("autoLive");}
             else a.Branch("0F 85","autoReset");
             a.Emit("83 BE $hp 00");a.Branch("0F 8E","autoReset");
             a.Emit("0F B6 96 $offerKind 83 FA 02");a.Branch("0F 87","autoReset");
             a.Emit("44 8B 40 38 85 D2");a.Branch("0F 84","autoMode");a.Emit("44 8B 40 3C");
             a.Label("autoMode");a.Emit("45 85 C0");a.Branch("0F 84","autoReset");
-            a.Emit("4C 8B 9E $offerCount 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 87","autoReset"); // mov r11,offer count; require 1..3
+            a.Emit("4C 8B 9E $offerCount 49 83 FB 01");a.Branch("0F 82","autoReset");a.Emit("49 83 FB 03");a.Branch("0F 86","autoCountValid");
+            a.Emit("44 89 98 88 01 00 00");a.Branch("E9","autoReset"); // publish unsupported count without reading the vector
+            a.Label("autoCountValid");
             a.Emit("4C 8B 8E $offers 4D 85 C9");a.Branch("0F 84","autoReset"); // mov r9,offer vector; test r9,r9
             // Detect a changed hand without depending on a UI-only counter.
             a.Emit("4D 89 CA 44 89 D9 69 C9");a.Bytes.AddRange(BitConverter.GetBytes(layout.OfferStride));a.Emit("C1 E9 03 31 D2");

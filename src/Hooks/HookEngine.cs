@@ -98,11 +98,13 @@ namespace AzerothTrainer
         internal static byte[] Build(IntPtr start,IntPtr continuation,IntPtr image,GameLayout layout)
         {
             var a=new Assembler(layout);FrameCode.Enter(a);FrameCode.Save(a);
-            a.Emit("48 89 B4 24 10 01 00 00 48 89 CE F3 0F 11 4C 24 78"); // save RSI; RSI=Game; save real frame time
+            a.Emit("48 89 B4 24 10 01 00 00"); // save RSI; capture proven Game and frame-time registers
+            a.Bytes.Add((byte)(0x48|(layout.RunOwnerRegister>=8?4:0)));a.Emit("89");a.Bytes.Add((byte)(0xc6+((layout.RunOwnerRegister&7)<<3)));
+            a.Emit("F3");if(layout.RunTimeRegister>=8)a.Emit("44");a.Emit("0F 11");a.Bytes.Add((byte)(0x44+((layout.RunTimeRegister&7)<<3)));a.Emit("24 78");
             FrameCode.Pointer(a,Native.Add(start,4096));
             bool actions=layout.Supports(TrainerFeature.RunResources),banishes=layout.Supports(TrainerFeature.Banishes);
             bool tracking=actions||banishes||layout.Supports(TrainerFeature.Gold)||layout.Supports(TrainerFeature.FreeRerolls)||layout.Supports(TrainerFeature.Shield)||layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.AutoPick)||layout.Supports(TrainerFeature.XpGrant)||layout.Supports(TrainerFeature.Lives);
-            if(tracking)RunCommands.Track(a);
+            if(tracking)RunCommands.Track(a,layout);
             if(banishes)
             {
                 Request(a,BanishRequest,layout.Field("banishes"),"banish");a.Emit("83 78 10 00");a.Branch("0F 84","noBan");a.Emit("C7 86 $banishes 0F 27 00 00");a.Label("noBan");
@@ -126,7 +128,7 @@ namespace AzerothTrainer
             }
             if(layout.Supports(TrainerFeature.AutoPick))AutoPickCode.Emit(a,start,image,layout);
             if(layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.Lives))RunStat.Emit(a,layout);
-            a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);a.Rip("F3 0F 59 0D",4096);FrameCode.Leave(a);
+            a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);a.SseRip(0x59,layout.RunTimeRegister,4096);FrameCode.Leave(a);
             // Replay the decoded register assignments and branch comparison.
             a.Bytes.AddRange(layout.Site("RunHook").Original);
             a.Bytes.AddRange(RarityCode.TailJump(continuation,layout.Site("RunHook").TailRegister));return a.Finish();
@@ -258,11 +260,23 @@ namespace AzerothTrainer
     {
         internal const string PrivilegeMessage="Cannot access the game. Run the trainer and game as the same Windows user and with matching administrator privileges. If the game is elevated, run the trainer as administrator too.";
         internal readonly Process Game;
+        internal bool ReviewedRelease {get{return layout.ReviewedRelease;}}
+        internal int AvailableStatCount {get{return layout.AvailableStatCount;}}
+        internal bool StatUnitsVerified {get{return layout.StatUnitsVerified;}}
         internal string CompatibilityDetails {get{return layout.Details;}}
         internal string UnavailableFeatures {get{return layout.UnavailableNames;}}
         internal bool Supports(TrainerFeature feature){return layout.Supports(feature);}
         internal bool SupportsStat(int index){return layout.SupportsStat(index);}
         internal bool HighestRaritySupported {get{return layout.OfferRarity>0;}}
+        internal int UnsupportedAutoPickCount
+        {
+            get
+            {
+                if(Exited||run==null||!run.Enabled||currentOptions.AutoSpellMode==0&&currentOptions.AutoItemMode==0)return 0;
+                if(BitConverter.ToInt32(Native.Read(handle,Native.Add(run.Cave,4096+RunCommands.Status),4),0)!=1)return 0;
+                return BitConverter.ToInt32(Native.Read(handle,Native.Add(run.Cave,4096+AutoPickCode.UnsupportedCount),4),0);
+            }
+        }
         internal int[] AvailableClasses
         {
             get
@@ -442,6 +456,7 @@ namespace AzerothTrainer
                 p.Data(RunCommands.Owner,new byte[24]);
                 p.Data(AutoPickCode.SpellMode,new byte[40]);p.Data(AutoPickCode.Random,BitConverter.GetBytes(unchecked((uint)Environment.TickCount)|1));p.Data(AutoPickCode.MaxDelta,BitConverter.GetBytes(0.1f));
                 p.Data(RunStat.DataOffset,new byte[RunStat.All.Length*RunStat.Stride]);
+                p.Data(AutoPickCode.UnsupportedCount,new byte[4]);
             });
             run.Data(0,BitConverter.GetBytes(options.SpeedEnabled?(float)options.Speed:1f));
             run.Data(AutoPickCode.Delay,BitConverter.GetBytes((float)options.AutoPickDelay));
@@ -497,11 +512,12 @@ namespace AzerothTrainer
             using(var frozen=new FrozenThreads(Game.Id))
                 foreach(int offset in RunCommands.Offsets)run.Data(offset,BitConverter.GetBytes(-1L));
         }
-        internal uint SetTalentPoints(int classId,int n){if(n<0||n>51)throw new ArgumentOutOfRangeException("points");return QueueProfile(ProfileCode.TalentRequest,classId,n);}
-        internal uint SetMarks(int classId,int rawTenths){if(rawTenths<0||rawTenths>10000000)throw new ArgumentOutOfRangeException("marks");return QueueProfile(ProfileCode.MarksRequest,classId,rawTenths);}
-        uint QueueProfile(int offset,int classId,int value)
+        internal uint SetTalentPoints(int classId,int n,bool confirmUnreviewed=false){if(n<0||n>51)throw new ArgumentOutOfRangeException("points");return QueueProfile(ProfileCode.TalentRequest,classId,n,confirmUnreviewed);}
+        internal uint SetMarks(int classId,int rawTenths,bool confirmUnreviewed=false){if(rawTenths<0||rawTenths>10000000)throw new ArgumentOutOfRangeException("marks");return QueueProfile(ProfileCode.MarksRequest,classId,rawTenths,confirmUnreviewed);}
+        uint QueueProfile(int offset,int classId,int value,bool confirmUnreviewed)
         {
             Require(offset==ProfileCode.MarksRequest?TrainerFeature.ClassMarks:TrainerFeature.ClassProgression);
+            if(!layout.ReviewedRelease&&!confirmUnreviewed)throw new Exception("Confirm the unreviewed build and unverified value units before a permanent edit.");
             if(classId<1||classId>255)throw new ArgumentOutOfRangeException("class");
             PrepareProfile();
             using(var frozen=new FrozenThreads(Game.Id))
