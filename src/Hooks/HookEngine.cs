@@ -128,7 +128,7 @@ namespace AzerothTrainer
             var a=new Assembler(layout);FrameCode.Enter(a);FrameCode.Save(a);
             a.Emit("48 89 B4 24 10 01 00 00"); // save RSI; capture proven Game and frame-time registers
             a.Bytes.Add((byte)(0x48|(layout.RunOwnerRegister>=8?4:0)));a.Emit("89");a.Bytes.Add((byte)(0xc6+((layout.RunOwnerRegister&7)<<3)));
-            a.Emit("F3");if(layout.RunTimeRegister>=8)a.Emit("44");a.Emit("0F 11");a.Bytes.Add((byte)(0x44+((layout.RunTimeRegister&7)<<3)));a.Emit("24 78");
+            if(layout.RunTimeRegister>=0){a.Emit("F3");if(layout.RunTimeRegister>=8)a.Emit("44");a.Emit("0F 11");a.Bytes.Add((byte)(0x44+((layout.RunTimeRegister&7)<<3)));a.Emit("24 78");}
             FrameCode.Pointer(a,Native.Add(start,4096));
             bool actions=layout.Supports(TrainerFeature.RunResources),banishes=layout.Supports(TrainerFeature.Banishes);
             bool tracking=actions||banishes||layout.Supports(TrainerFeature.Gold)||layout.Supports(TrainerFeature.FreeRerolls)||layout.Supports(TrainerFeature.Shield)||layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.AutoPick)||layout.Supports(TrainerFeature.XpGrant)||layout.Supports(TrainerFeature.Lives);
@@ -148,7 +148,9 @@ namespace AzerothTrainer
             {
                 RunCommands.Take(a,HealRequest,"autoHeal");a.Branch("E9","heal");a.Label("autoHeal");a.Emit("83 78 24 00");a.Branch("0F 84","noHeal");a.Emit("83 BE $hp 00");a.Branch("0F 8E","noHeal");
                 a.Label("heal");a.Emit("44 8B 96 $maxHp 44 89 96 $hp");a.Label("noHeal");
-                RunCommands.Take(a,AdvanceRequest,"noAdvance");a.Emit("66 41 0F 6E C2 F3 0F 58 86 $clock F3 0F 11 86 $clock F3 0F 11 40 68");a.Label("noAdvance");
+                RunCommands.Take(a,AdvanceRequest,"noAdvance");a.Emit("66 41 0F 6E C2");
+                if(layout.RunClockDirection<0)a.Emit("0F 57 C9 F3 0F 5C C8 0F 28 C1"); // negate the requested seconds for a countdown
+                a.Emit("F3 0F 58 86 $clock F3 0F 11 86 $clock F3 0F 11 40 68");a.Label("noAdvance");
             }
             if(layout.Supports(TrainerFeature.XpGrant))
             {
@@ -156,7 +158,7 @@ namespace AzerothTrainer
             }
             if(layout.Supports(TrainerFeature.AutoPick))AutoPickCode.Emit(a,start,image,layout);
             if(layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.Lives))RunStat.Emit(a,layout);
-            a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);a.SseRip(0x59,layout.RunTimeRegister,4096);FrameCode.Leave(a);
+            a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);if(layout.Supports(TrainerFeature.RunControls))a.SseRip(0x59,layout.RunTimeRegister,4096);FrameCode.Leave(a);
             // Replay the decoded register assignments and branch comparison.
             RarityCode.Replay(a,start,image,layout.Site("RunHook"));
             a.Bytes.AddRange(RarityCode.TailJump(continuation,layout.Site("RunHook").TailRegister));return a.Finish();
@@ -353,6 +355,7 @@ namespace AzerothTrainer
         bool disposed,connected;
         TrainerOptions currentOptions=new TrainerOptions();
         internal bool Connected {get{return connected||Enabled;}}
+        internal bool HasRunHook {get{return run!=null;}}
         internal bool Enabled {get {foreach(var p in all)if(p.Enabled)return true;return false;}}
         internal bool Exited {get {if(disposed)return true;try{return Game.HasExited;}catch(InvalidOperationException){return true;}}}
         internal PatchSession(Process game,IntPtr imageBase,GameLayout build)
@@ -364,7 +367,7 @@ namespace AzerothTrainer
                 layout.ValidateLive(handle,imageBase);
                 if(Supports(TrainerFeature.SpellChance))AddRarity(imageBase,layout.Site("Spell"),0);
                 if(Supports(TrainerFeature.ItemChance)){AddRarity(imageBase,layout.Site("Jewelry1"),1);AddRarity(imageBase,layout.Site("Jewelry2"),2);}
-                if(Supports(TrainerFeature.RunControls))
+                if(layout.HasRunHook)
                 {
                     HookSite tick=layout.Site("RunHook");
                     run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
@@ -551,12 +554,12 @@ namespace AzerothTrainer
             if(owner==IntPtr.Zero)throw new Exception("Enter a live run before sending a run action.");
             byte phase=Native.Read(handle,Native.Add(owner,layout.Field("phase")),1)[0];
             float hp=BitConverter.ToSingle(Native.Read(handle,Native.Add(owner,layout.Field("hp")),4),0);
-            if((phase!=1&&phase!=2)||!(hp>0))throw new Exception("Enter a live run before sending a run action.");
+            if((phase!=layout.RunningState&&phase!=layout.OfferState)||!(hp>0))throw new Exception("Enter a live run before sending a run action.");
             run.Data(offset,BitConverter.GetBytes(RunCommands.Pack(state,BitConverter.ToUInt32(bytes,0))));
         }
         internal void CancelRunRequests()
         {
-            Require(TrainerFeature.RunControls);
+            if(run==null)throw new Exception("Run actions are unavailable for this game build.");
             if(Exited||!Connected)throw new Exception("Enable the trainer first.");if(run==null||!run.Enabled)return;
             using(var frozen=new FrozenThreads(Game.Id))
                 foreach(int offset in RunCommands.Offsets)run.Data(offset,BitConverter.GetBytes(-1L));

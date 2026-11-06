@@ -576,50 +576,58 @@ namespace AzerothTrainer
             try{int last=Cover(match.Item1,match.Item2,12);match.Item1.DeadAfter(match.Item2,Register.RAX);Sites["HealthHook"]=Site("HealthHook",match.Item1,match.Item2,last,last);}
             catch(Exception ex){Failures["HealthHook"]="Health fields recognized; floor patch refused: "+ex.Message;}
         }
-        internal int RunOwnerRegister=1,RunTimeRegister=1;
+        internal int RunOwnerRegister=1,RunTimeRegister=-1,RunClockDirection=1;
+        readonly HashSet<int> runPhaseOffsets=new HashSet<int>();
         void DiscoverRun()
         {
             var anchored=Referencing("WOW_ROGUE_SINK_AT").ToArray();var peers=RunPhasePeers();
-            Need(peers.Count>0,"No independent handler establishes a phase byte for Run.");
-            var nominations=anchored.Concat(peers.Keys.SelectMany(offset=>Anchored(BitConverter.GetBytes(offset)))).GroupBy(c=>c.Function.Start).Select(g=>g.First());
+            runPhaseOffsets.UnionWith(peers.Keys);
+            var nominations=anchored.Concat(peers.Keys.SelectMany(offset=>Anchored(BitConverter.GetBytes(offset)))).GroupBy(c=>c.Function.Start).Select(g=>g.First()).ToArray();
             var candidates=new List<DecodedCode>();
             foreach(var code in nominations)
             try
             {
-                var phases=PhaseChecks(code).Where(p=>code.Instructions[p.Item1].IP<(ulong)(code.Function.Start+512)&&peers.ContainsKey(DecodedCode.Disp(code.Instructions[p.Item1]))).ToArray();
-                if(phases.Length==0)continue;candidates.Add(code);
+                var phases=PhaseChecks(code).Where(p=>peers.ContainsKey(DecodedCode.Disp(code.Instructions[p.Item1]))).ToArray();
+                if(phases.Length==0&&peers.Count>0)continue;candidates.Add(code);
             }
             catch(Exception ex){Failures["Run candidate 0x"+code.Function.Start.ToString("x")]=ex.Message;}
-            // Phase agreement applies before dispatch hierarchy. An outer clock
-            // wrapper and a subsystem cannot displace the actual run host.
-            var children=new HashSet<int>(candidates.SelectMany(c=>ForwardCalls(c).Select(p=>(int)c.Instructions[p].NearBranchTarget)));
-            var roots=candidates.Where(c=>!children.Contains(c.Function.Start)).ToArray();
-            var preferred=roots.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
-            var native=new HashSet<int>();foreach(var code in roots)foreach(int offset in StrongClocks(code,1))native.Add(offset);
+            // A caller does not establish the identity of its callee. Filter by
+            // clock coverage before using dispatch or debug-string evidence.
+            var roots=candidates.ToArray();var direct=new HashSet<int>();var native=new HashSet<int>();
+            foreach(var code in roots){direct.UnionWith(StrongClocks(code,0));native.UnionWith(StrongClocks(code,1));}
             int ui=UiKnown("clock"),text=TextKnown("clock"),clock=-1;
             Func<int,bool> supported=offset=>offset>=0&&roots.Any(c=>ClockCoverage(c,offset,1).Length>0);
-            if(text>=0&&supported(text)&&(text==ui||native.Contains(text)||native.Count!=1))clock=text;
+            var options=direct.Concat(new[]{ui,text}).Where(supported).Distinct().ToArray();
+            Func<int,int> votes=offset=>(offset==ui?1:0)+(offset==text?1:0)+(direct.Contains(offset)?1:0);
+            if(options.Length>0){int best=options.Max(votes);var top=options.Where(offset=>votes(offset)==best).ToArray();if(top.Length==1)clock=top[0];else FieldErrors["clock"]="Independent clock witnesses disagree without a majority.";}
             else if(native.Count==1)clock=native.First();
-            else if(supported(ui))clock=ui;
-            else if(supported(text))clock=text;
             if(clock>=0&&ui>=0&&ui!=clock)RefuseUi("clock","HUD clock disagrees with independently corroborated run-clock evidence.");
             roots=roots.Where(c=>ClockCoverage(c,clock,1).Length>0).ToArray();
-            var parents=roots.Where(c=>roots.Any(other=>other!=c&&ForwardCalls(c).Any(p=>c.Instructions[p].NearBranchTarget==(ulong)other.Function.Start))).ToArray();if(parents.Length>0)roots=parents;
+            // Classify dispatch targets even when their host uses an unsupported
+            // Game argument. Coop cannot become Run when that host is refused.
+            var children=new HashSet<int>();var dispatchers=new HashSet<int>();
+            foreach(var code in nominations)for(int argument=0;argument<4;argument++)for(int p=0;p<code.Instructions.Length;p++)
+                foreach(int call in CoopDispatches(code,p,clock,argument))
+                {children.Add((int)code.Instructions[call].NearBranchTarget);if(argument==0)dispatchers.Add(code.Function.Start);}
+            roots=roots.Where(c=>!children.Contains(c.Function.Start)).ToArray();
+            if(peers.Count==0)roots=roots.Where(c=>dispatchers.Contains(c.Function.Start)).ToArray();
+            var preferred=roots.Where(c=>dispatchers.Contains(c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
+            preferred=roots.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
             if(roots.Length!=1){Failures["Run"]="Phase-qualified run hosts: "+roots.Length+"; clock evidence "+(clock<0?"unresolved":"+0x"+clock.ToString("x"))+". "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
             var run=roots[0];var list=run.Instructions;Functions["Run"]=run;
+            var directions=ClockDirections(run,clock,1);if(directions.Count==1)RunClockDirection=directions.First();else if(directions.Count>1)FieldErrors["clock"]="Run clock updates disagree on their direction.";
             if(clock>=0){Field("clock",clock,"Run");DependOnUi(run,"clock");DependOnText(run,"clock");}
             foreach(var phase in PhaseChecks(run).Where(p=>peers.ContainsKey(DecodedCode.Disp(list[p.Item1]))))foreach(var witness in peers[DecodedCode.Disp(list[phase.Item1])])run.Dependencies[witness.Function.Start]=witness.Function.Length;
             foreach(int call in ClockCoverage(run,clock,1).Where(p=>IsForward(run,p)))
             {var target=ForwardTarget(run,call);if(target!=null)run.Dependencies[target.Function.Start]=target.Function.Length;}
-            var timeArguments=ClockArguments(run,clock,1);Need(timeArguments.Count==1,"Run has no unique incoming float argument reaching its clock updates.");int timeArgument=timeArguments.First();
+            var timeArguments=ClockArguments(run,clock,1);int timeArgument=timeArguments.Count==1?timeArguments.First():-1;
             var healingTargets=new HashSet<int>();var clockTargets=ClockCoverage(run,clock,1).ToList();var stateGuards=new List<int>();
             for(int p=0;p<list.Length;p++)
             {
                 var i=list[p];if(i.MemoryIndex!=Register.None||!run.Flow.Argument(p,i.MemoryBase,0))continue;
-                if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&i.MemorySize.GetSize()==1&&ByteImmediate(i))stateGuards.Add(p);
-                if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movzx&&i.MemorySize.GetSize()==1&&list[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(list[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&ByteImmediate(list[p+1]))stateGuards.Add(p);
                 if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Disp(i)==Known("maxHp")&&Store(list[p+1],Mnemonic.Movss,i.MemoryBase,DecodedCode.Disp(list[p+1]),i.Op0Register)&&DecodedCode.Disp(list[p+1])!=Known("maxHp"))healingTargets.Add(DecodedCode.Disp(list[p+1]));
             }
+            stateGuards.AddRange(PhaseChecks(run).Select(p=>p.Item1));
             if(healingTargets.Count==1)Field("hp",healingTargets.First(),"Run");
             foreach(int guard in stateGuards)
             {
@@ -628,19 +636,21 @@ namespace AzerothTrainer
                 if(branch<list.Length&&(list[branch].Mnemonic==Mnemonic.Jne||list[branch].Mnemonic==Mnemonic.Je))
                 {
                     int target=run.Index(list[branch].NearBranchTarget),equal=list[branch].Mnemonic==Mnemonic.Je?target:branch+1,unequal=list[branch].Mnemonic==Mnemonic.Jne?target:branch+1;
-                    if(run.ReachesBefore(equal,guard,clockTargets)==true&&run.ReachesBefore(unequal,guard,clockTargets)==false)value=(int)list[compare].GetImmediate(1);
+                    if(run.ReachesBefore(equal,guard,clockTargets)==true&&run.ReachesBefore(unequal,guard,clockTargets)==false)value=list[compare].Mnemonic==Mnemonic.Test?0:(int)list[compare].GetImmediate(1);
                 }
-                if(list[guard].Mnemonic!=Mnemonic.Cmp||value>=0)Phase(DecodedCode.Disp(list[guard]),"Run",value);
+                if(list[guard].Mnemonic!=Mnemonic.Cmp&&list[compare].Mnemonic!=Mnemonic.Test||value>=0)Phase(DecodedCode.Disp(list[guard]),"Run",value);
             }
             var dispatches=Enumerable.Range(0,list.Length).Where(p=>IsCoopDispatch(run,p)).ToArray();
-            var coverage=dispatches.Concat(clockTargets).Concat(ForwardCalls(run).Where(p=>ClockCoverage(ForwardTarget(run,p),clock,0).Length>0||Enumerable.Range(0,4).Any(slot=>IsFrameTime(run.Flow.At(p,(Register)((int)Register.XMM0+slot)),timeArgument)))).Distinct().ToArray();
+            var coverage=dispatches.Concat(clockTargets).Concat(ForwardCalls(run)).Distinct().ToArray();
             var errors=new List<string>();
+            foreach(bool requireTime in timeArgument>=0?new[]{true,false}:new[]{false})
             for(int first=Math.Max(0,run.Index((ulong)(run.Function.Start+Image.UnwindInfo(run.Function)[1])));first<list.Length&&list[first].IP<(ulong)(run.Function.Start+512);first++)
             {
                 int game=Enumerable.Range(1,15).FirstOrDefault(r=>run.Flow.Argument(first,(Register)((int)Register.RAX+r),0));
                 if(!run.Flow.Argument(first,(Register)((int)Register.RAX+game),0))continue;
-                int dt=Enumerable.Range(6,10).Concat(Enumerable.Range(0,6)).FirstOrDefault(r=>IsFrameTime(run.Flow.At(first,(Register)((int)Register.XMM0+r)),timeArgument));if(!IsFrameTime(run.Flow.At(first,(Register)((int)Register.XMM0+dt)),timeArgument))continue;
-                try{Need(run.Dominates(first,coverage),"Run window does not dominate the dispatch, solo clock and co-op exits; coverage is unproven.");HookSite site=null;foreach(int size in new[]{12,6})try{int last=Cover(run,first,size);run.DeadAfter(first,Register.RAX);site=Site("RunHook",run,first,last,last);break;}catch{if(size==6)throw;}Sites["RunHook"]=site;RunOwnerRegister=game;RunTimeRegister=dt;return;}
+                int dt=Enumerable.Range(6,10).Concat(Enumerable.Range(0,6)).Where(r=>IsFrameTime(run.Flow.At(first,(Register)((int)Register.XMM0+r)),timeArgument)).DefaultIfEmpty(-1).First();
+                if(requireTime&&dt<0)continue;if(!requireTime)dt=-1;
+                try{Need(run.Dominates(first,coverage),"Run window does not dominate the dispatch, solo clock and co-op exits; coverage is unproven.");HookSite site=null;foreach(int size in new[]{12,6})try{int last=Cover(run,first,size);run.DeadAfter(first,Register.RAX);site=Site("RunHook",run,first,last,last);break;}catch{if(size==6)throw;}Sites["RunHook"]=site;RunOwnerRegister=game;RunTimeRegister=dt;if(dt<0)Failures["RunTime"]="No unique incoming float argument reaches the clock; speed and delayed auto-pick are unavailable.";return;}
                 catch(Exception ex){errors.Add("0x"+list[first].IP.ToString("x")+": "+ex.Message);}
             }
             Failures["RunHook"]="Run fields recognized, but no safe window with Game/frame-time provenance: "+String.Join("; ",errors.GroupBy(e=>e.Substring(e.IndexOf(": ",StringComparison.Ordinal)+2)).Take(8).Select(g=>g.First()).ToArray());
@@ -680,11 +690,17 @@ namespace AzerothTrainer
                 var i=ins[p];if(i.MemoryIndex!=Register.None||i.MemorySize.GetSize()!=1||DecodedCode.Disp(i)<0x100||!code.Flow.Argument(p,i.MemoryBase,0))continue;
                 if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&ByteImmediate(i))yield return Tuple.Create(p,p);
                 else if(i.Mnemonic==Mnemonic.Movzx&&p+1<ins.Length&&ins[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(ins[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&ByteImmediate(ins[p+1]))yield return Tuple.Create(p,p+1);
+                else if(i.Mnemonic==Mnemonic.Movzx&&p+1<ins.Length&&SelfTest(ins[p+1],i.Op0Register))yield return Tuple.Create(p,p+1);
             }
         }
-        static bool IsForward(DecodedCode code,int p)
+        static bool SelfTest(Instruction i,Register register)
         {
-            if(code==null)return false;var i=code.Instructions[p];return (i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&(i.NearBranchTarget<(ulong)code.Function.Start||i.NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length))&&code.Flow.Argument(p,Register.RCX,0);
+            return i.Mnemonic==Mnemonic.Test&&i.Op0Kind==OpKind.Register&&i.Op1Kind==OpKind.Register&&i.Op0Register==i.Op1Register&&DecodedCode.Full(i.Op0Register)==DecodedCode.Full(register)&&
+                i.Op0Register!=Register.AH&&i.Op0Register!=Register.BH&&i.Op0Register!=Register.CH&&i.Op0Register!=Register.DH&&(register.GetSize()==4||i.Op0Register.GetSize()<=register.GetSize());
+        }
+        static bool IsForward(DecodedCode code,int p,int argument=0)
+        {
+            if(code==null)return false;var i=code.Instructions[p];return (i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&(i.NearBranchTarget<(ulong)code.Function.Start||i.NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length))&&code.Flow.Argument(p,Register.RCX,argument);
         }
         readonly Dictionary<int,int[]> forwardCalls=new Dictionary<int,int[]>();
         int[] ForwardCalls(DecodedCode code)
@@ -727,6 +743,12 @@ namespace AzerothTrainer
             }
             return arguments;
         }
+        HashSet<int> ClockDirections(DecodedCode code,int clock,int depth)
+        {
+            var directions=new HashSet<int>();if(code==null)return directions;
+            foreach(int p in DirectClocks(code,clock)){var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);if(value!=null&&value.Clock(DecodedCode.Disp(i)))directions.Add(value.Root==25?-1:1);}
+            if(depth>0)foreach(int call in ForwardCalls(code))directions.UnionWith(ClockDirections(ForwardTarget(code,call),clock,depth-1));return directions;
+        }
         static HashSet<int> FloatArguments(DecodedCode code)
         {
             var arguments=new HashSet<int>();var factory=new InstructionInfoFactory();if(code==null)return arguments;
@@ -738,17 +760,18 @@ namespace AzerothTrainer
             return arguments;
         }
         bool IsCoopDispatch(DecodedCode code,int at,int expected=-1)
+        {return CoopDispatches(code,at,Known("clock"),0).Any(p=>expected<0||code.Instructions[p].NearBranchTarget==(ulong)expected);}
+        IEnumerable<int> CoopDispatches(DecodedCode code,int at,int clock,int argument)
         {
             var ins=code.Instructions;var i=ins[at];
             bool compare=i.Mnemonic==Mnemonic.Cmp&&(DecodedCode.Immediate(i,1,0)||DecodedCode.Immediate(i,1,1)),test=i.Mnemonic==Mnemonic.Test&&DecodedCode.Immediate(i,1,255);
-            if(at+1>=ins.Length||!compare&&!test||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||i.IP>=(ulong)(code.Function.Start+512)||!code.Flow.Argument(at,i.MemoryBase,0))return false;
+            if(at+1>=ins.Length||!compare&&!test||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||runPhaseOffsets.Contains(DecodedCode.Disp(i))||i.IP>=(ulong)(code.Function.Start+512)||!code.Flow.Argument(at,i.MemoryBase,argument))yield break;
             int branch=at+1;while(branch<Math.Min(ins.Length,at+6)&&ins[branch].FlowControl==FlowControl.Next&&ins[branch].RflagsModified==0)branch++;
-            if(branch>=ins.Length||ins[branch].Mnemonic!=Mnemonic.Je&&ins[branch].Mnemonic!=Mnemonic.Jne)return false;
+            if(branch>=ins.Length||ins[branch].Mnemonic!=Mnemonic.Je&&ins[branch].Mnemonic!=Mnemonic.Jne)yield break;
             int target=code.Index(ins[branch].NearBranchTarget),equal=ins[branch].Mnemonic==Mnemonic.Je?target:branch+1,unequal=ins[branch].Mnemonic==Mnemonic.Jne?target:branch+1;
             bool exact=compare&&DecodedCode.Immediate(i,1,1);int nonzero=exact?equal:unequal,zero=exact?unequal:equal;
-            foreach(int call in ForwardCalls(code).Where(p=>(expected<0||ins[p].NearBranchTarget==(ulong)expected)&&ClockCoverage(ForwardTarget(code,p),Known("clock"),0).Length>0))
-                if(code.ReachesBefore(nonzero,at,new[]{call})==true&&code.ReachesBefore(zero,at,new[]{call})==false)return true;
-            return false;
+            foreach(int call in Enumerable.Range(0,ins.Length).Where(p=>IsForward(code,p,argument)&&ClockCoverage(ForwardTarget(code,p),clock,0).Length>0))
+                if(code.ReachesBefore(nonzero,at,new[]{call})==true&&code.ReachesBefore(zero,at,new[]{call})==false)yield return call;
         }
         static bool RunClockStore(DecodedCode code,int at,int clock)
         {

@@ -13,7 +13,8 @@ namespace AzerothTrainer
             // Roots 1..4 are entry RCX/RDX/R8/R9, 5 is the frame, 6 an
             // image literal, 7 an integer constant, and 11..14 an object field
             // read through the corresponding entry argument. Roots 20 and 21
-            // are sums and products; root 22 identifies an opaque scalar.
+            // are sums and products; root 22 identifies an opaque scalar;
+            // roots 23..25 retain minimum, maximum and subtraction dependencies.
             // Offset is bytes except for scalar arguments and value identities.
             internal readonly int Root,Transform;internal readonly long Offset;internal readonly bool Floating;
             internal readonly Value Left,Right;internal readonly bool Current=true;internal readonly int Depth;
@@ -23,13 +24,15 @@ namespace AzerothTrainer
             internal Value(Value left,Value right,bool floating){Root=20;Left=left;Right=right;Floating=floating;Depth=Math.Max(left.Depth,right.Depth)+1;}
             internal static Value Sum(Value left,Value right,bool floating){return left==null||right==null||Math.Max(left.Depth,right.Depth)>=16?null:new Value(left,right,floating);}
             internal static Value Product(Value left,Value right,int identity)
+            {return Scalar(left,right,identity,21);}
+            internal static Value Scalar(Value left,Value right,int identity,int root)
             {
                 // An unknown scale retains argument dependence, not its value.
                 left=left??new Value(22,identity,true);right=right??new Value(22,identity,true);
-                var result=Sum(left,right,true);return result==null?null:new Value(21,result);
+                var result=Sum(left,right,true);return result==null?null:new Value(root,result);
             }
             Value(int root,Value expression){Root=root;Left=expression.Left;Right=expression.Right;Floating=true;Depth=expression.Depth;}
-            internal bool Expression {get{return Root==20||Root==21;}}
+            internal bool Expression {get{return Root==20||Root==21||Root>=23&&Root<=25;}}
             internal bool Snapshot {get{return Current&&(!Expression||Left.Snapshot&&Right.Snapshot);}}
             internal bool ReadsField {get{return Root>=11&&Root<=14||Expression&&(Left.ReadsField||Right.ReadsField);}}
             internal bool Aliases(Value address,int width)
@@ -40,8 +43,8 @@ namespace AzerothTrainer
             internal bool Clock(long offset){return ClockArgument(offset)>=0;}
             internal int ClockArgument(long offset)
             {
-                if(!Snapshot||Root!=20||!Floating)return -1;
-                if(Field(Left,offset))return UniqueArgument(Right);if(Field(Right,offset))return UniqueArgument(Left);return -1;
+                if(!Snapshot||Root!=20&&Root!=25||!Floating)return -1;
+                if(Field(Left,offset))return UniqueArgument(Right);if(Root==20&&Field(Right,offset))return UniqueArgument(Left);return -1;
             }
             static bool Field(Value value,long offset){return value.Current&&value.Root==11&&value.Floating&&value.Transform==0&&value.Offset==offset;}
             static int UniqueArgument(Value value){var args=new HashSet<int>();value.Arguments(args);return args.Count==1?args.First():-1;}
@@ -133,6 +136,8 @@ namespace AzerothTrainer
                 if(vector>=0&&i.Mnemonic==Mnemonic.Addss)
                     scalarResult=Value.Sum(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,true);
                 if(vector>=0&&i.Mnemonic==Mnemonic.Mulss)scalarResult=Value.Product(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):Get(state,i.Op1Register),at);
+                if(vector>=0&&(i.Mnemonic==Mnemonic.Minss||i.Mnemonic==Mnemonic.Minps||i.Mnemonic==Mnemonic.Maxss||i.Mnemonic==Mnemonic.Maxps||i.Mnemonic==Mnemonic.Subss))
+                    scalarResult=Value.Scalar(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):Get(state,i.Op1Register),at,i.Mnemonic==Mnemonic.Subss?25:i.Mnemonic==Mnemonic.Minss||i.Mnemonic==Mnemonic.Minps?23:24);
                 if(i.Op0Kind==OpKind.Memory)
                 {
                     Value address=Address(state,i);

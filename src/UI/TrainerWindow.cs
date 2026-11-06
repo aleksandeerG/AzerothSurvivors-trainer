@@ -14,7 +14,7 @@ namespace AzerothTrainer
         readonly ComboBox resourceKind=new ComboBox(),classKind=new ComboBox(),spellRule=new ComboBox(),itemRule=new ComboBox();
         readonly DataGridView stats=new DataGridView();
         readonly Label status=new Label(),resourceHelp=new Label(),compatibility=new Label(),autoPickStatus=new Label();readonly Timer timer=new Timer();readonly ToolTip compatibilityTip=new ToolTip();
-        readonly Button enable=new Button(),apply=new Button(),disable=new Button();
+        readonly Button enable=new Button(),apply=new Button(),disable=new Button(),cancelRun;
         readonly Dictionary<Control,TrainerFeature> connectedFeatures=new Dictionary<Control,TrainerFeature>();
         Button resourceAction;
         sealed class LoadedClass
@@ -48,7 +48,7 @@ namespace AzerothTrainer
             Check(run.Controls,xpOn,"Run XP multiplier",18,60,220,false);Number(run.Controls,xp,235,60,115,0.1m,100,1,1,0.1m);
             Check(run.Controls,autoHeal,"Auto-heal while alive",388,60,300,false);
             resourceHelp.SetBounds(18,115,660,36);run.Controls.Add(resourceHelp);
-            Button(run.Controls,"Cancel queued actions",18,156,260,delegate{session.CancelRunRequests();status.Text="Queued run actions cancelled. Completed actions are kept.";},true);
+            cancelRun=Button(run.Controls,"Cancel queued actions",18,156,260,delegate{session.CancelRunRequests();status.Text="Queued run actions cancelled. Completed actions are kept.";},true);connectedFeatures.Remove(cancelRun);
             Label(run.Controls,"Run resource",18,202,180,24,null);resourceKind.SetBounds(18,231,220,30);ComboStyle(resourceKind);
             resourceKind.Items.AddRange(new object[]{"Gold (set)","Banishes (set)","Free rerolls (set)","Shield (set)","Run XP (grant)"});run.Controls.Add(resourceKind);
             Number(run.Controls,resource,252,231,135,0,100000,1000,0,1);resourceKind.SelectedIndexChanged+=delegate{ResourceLimits();};resourceKind.SelectedIndex=0;
@@ -228,6 +228,7 @@ namespace AzerothTrainer
         {
             ApplyCompatibility();bool active=session!=null&&session.Connected;
             enable.Enabled=!active&&!busy;apply.Enabled=disable.Enabled=active&&!busy;
+            cancelRun.Enabled=active&&!busy&&session.HasRunHook;
             foreach(var entry in connectedFeatures)entry.Key.Enabled=active&&!busy&&Available(entry.Value)&&((entry.Value!=TrainerFeature.ClassProgression&&entry.Value!=TrainerFeature.ClassMarks)||classKind.SelectedItem is LoadedClass);
         }
         void SetBusy(bool value){foreach(Control c in Controls)if(!(c is Label))c.Enabled=!value;UpdateButtons();}

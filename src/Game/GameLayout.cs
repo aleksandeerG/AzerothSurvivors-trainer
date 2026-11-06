@@ -18,6 +18,8 @@ namespace AzerothTrainer
         internal int HealthRegister {get{return discovery.HealthRegister;}}
         internal int RunOwnerRegister {get{return discovery.RunOwnerRegister;}}
         internal int RunTimeRegister {get{return discovery.RunTimeRegister;}}
+        internal int RunClockDirection {get{return discovery.RunClockDirection;}}
+        internal bool HasRunHook {get{return dependencies.Any(p=>p.Value.Contains("Run")&&Supports(p.Key));}}
         internal int RunningState {get{return discovery.RunningState;}}
         internal int OfferState {get{return discovery.OfferState;}}
         internal int CoopValue {get{return discovery.CoopValue;}}
@@ -58,6 +60,7 @@ namespace AzerothTrainer
                     foreach(string name in dependency.Value)Need(Valid(name),name+": "+Reason(name));
                     switch(dependency.Key)
                     {
+                        case TrainerFeature.RunControls:Need(RunTimeRegister>=0,"The run host is recognized, but its frame-time argument is unproven.");break;
                         case TrainerFeature.ItemChance:Need(discovery.ReviewedRelease||Valid("ItemBuilder"),"The native item-builder link is unavailable.");if(discovery.Functions.ContainsKey("ItemBuilder"))Need(Valid("ItemBuilder"),Reason("ItemBuilder"));break;
                         case TrainerFeature.RerollCost:Need(discovery.PricesComplete&&PriceCount>0&&Valid("PriceAction"),"Incomplete or unproven reroll pricing. "+Reason("Prices"));break;
                         case TrainerFeature.RunResources:Fields("hp","maxHp","phase","clock");break;
@@ -69,7 +72,7 @@ namespace AzerothTrainer
                             Fields("hp","phase","clock");
                             Need(RunStat.All.Where(s=>s.Field!=0x5c8&&s.Field!=0x628).Any(s=>HasStatField(s.Field)),"No stat row has a native semantic witness or reviewed layout.");break;
                         case TrainerFeature.HealthFloor:Fields("maxHp");break;
-                        case TrainerFeature.AutoPick:Fields("hp","phase","clock","coop","offers","offerCount","offerKind");Need(OfferStride>0,"Offer record bounds are unproven; auto-pick is disabled.");break;
+                        case TrainerFeature.AutoPick:Fields("hp","phase","clock","coop","offers","offerCount","offerKind");Need(RunTimeRegister>=0,"Delayed auto-pick needs a proven frame-time argument.");Need(OfferStride>0,"Offer record bounds are unproven; auto-pick is disabled.");break;
                         case TrainerFeature.CoopAutoPick:Fields("hp","phase","clock","coop","coopPhase","offers","offerCount","offerKind");Edge("Run","Coop");break;
                         case TrainerFeature.XpGrant:Fields("hp","phase","clock");break;
                         case TrainerFeature.XpScaling:Fields("xp");Need(discovery.Fields["xp"].Keys.Any(k=>(k.StartsWith("UI:")||k.StartsWith("Text:"))&&Valid(k)),"The native UI XP identity is unavailable.");break;
@@ -112,7 +115,7 @@ namespace AzerothTrainer
             // Also build the complete combination that Apply will install.
             try
             {
-                if(Supports(TrainerFeature.RunControls))CheckBuild(Site("RunHook"),RunCode.Build(new IntPtr(0x150000000L),new IntPtr(0x140000000L+Site("RunHook").Continuation),new IntPtr(0x140000000L),this));
+                if(HasRunHook)CheckBuild(Site("RunHook"),RunCode.Build(new IntPtr(0x150000000L),new IntPtr(0x140000000L+Site("RunHook").Continuation),new IntPtr(0x140000000L),this));
             }
             catch(Exception ex){foreach(var feature in dependencies.Where(p=>p.Value.Contains("Run")).Select(p=>p.Key).ToArray())unavailable[feature]="Combined run-hook trial refused: "+ex.Message;}
             try
