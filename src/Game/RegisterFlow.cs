@@ -52,7 +52,7 @@ namespace AzerothTrainer
                 return changed;
             }
         }
-        readonly State[] before;
+        readonly State[] before;readonly Instruction[] codeInstructions;
         static int Vector(Register register){int index=(int)DecodedCode.Full(register)-(int)DecodedCode.Full(Register.XMM0);return index>=0&&index<16?index:-1;}
         static Value Get(State state,Register register){int index=DecodedCode.Gpr(register);if(index>=0)return state.Registers[index];index=Vector(register);return index>=0?state.Scalars[index]:null;}
         static Value Load(State state,Instruction i,bool scalar)
@@ -69,7 +69,7 @@ namespace AzerothTrainer
         }
         internal RegisterFlow(DecodedCode code)
         {
-            before=new State[code.Instructions.Length];var entry=new State();
+            codeInstructions=code.Instructions;before=new State[code.Instructions.Length];var entry=new State();
             entry.Registers[DecodedCode.Gpr(Register.RCX)]=new Value(1);entry.Registers[DecodedCode.Gpr(Register.RDX)]=new Value(2);
             entry.Registers[DecodedCode.Gpr(Register.R8)]=new Value(3);entry.Registers[DecodedCode.Gpr(Register.R9)]=new Value(4);entry.Registers[DecodedCode.Gpr(Register.RSP)]=new Value(5);
             for(int n=0;n<4;n++)entry.Scalars[n]=new Value(8,n,true);
@@ -91,7 +91,11 @@ namespace AzerothTrainer
                         }
                         else if(i.Op1Kind==OpKind.Immediate64)result=new Value(7,unchecked((long)i.Immediate64));
                     }
-                    if(i.Mnemonic==Mnemonic.Lea)result=Address(state,i);
+                    if(i.Mnemonic==Mnemonic.Lea)
+                    {
+                        result=Address(state,i);
+                        if(i.MemoryIndex!=Register.None&&i.MemoryIndexScale==1&&i.MemoryDisplacement64==0&&(i.Op0Register.GetSize()==4||i.Op0Register.GetSize()==8))result=Value.Sum(Get(state,i.MemoryBase),Get(state,i.MemoryIndex),false);
+                    }
                     if((i.Mnemonic==Mnemonic.Add||i.Mnemonic==Mnemonic.Sub)&&i.Op1Kind!=OpKind.Register&&i.Op1Kind!=OpKind.Memory)
                     {Value old=Get(state,i.Op0Register);if(old!=null&&old.Root<11)result=old.Add((i.Mnemonic==Mnemonic.Sub?-1:1)*unchecked((long)i.GetImmediate(1)));}
                     if(i.Mnemonic==Mnemonic.Mov&&i.Op0Register.GetSize()==4&&i.Op1Kind==OpKind.Immediate32)result=new Value(7,i.Immediate32);
@@ -186,6 +190,12 @@ namespace AzerothTrainer
         }
         static void Terms(Value value,List<Value> terms)
         {if(value==null)return;if(value.Root==20&&value.Floating){Terms(value.Left,terms);Terms(value.Right,terms);}else terms.Add(value);}
+        internal Value StoredValue(int at)
+        {
+            if(at<0||at>=before.Length||before[at]==null)return null;var i=codeInstructions[at];
+            if(i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=4||i.Op1Kind!=OpKind.Register)return null;
+            return i.Mnemonic==Mnemonic.Add?Value.Sum(Load(before[at],i,false),Get(before[at],i.Op1Register),false):i.Mnemonic==Mnemonic.Mov?Get(before[at],i.Op1Register):null;
+        }
         internal Value At(int index,Register register){return index>=0&&index<before.Length&&before[index]!=null?Get(before[index],register):null;}
         internal Value FrameAt(int index,long offset)
         {Value value;return index>=0&&index<before.Length&&before[index]!=null&&before[index].Stack.TryGetValue(offset,out value)?value:null;}

@@ -30,8 +30,12 @@ namespace AzerothTrainer
         internal RuntimeDiscovery(GameImage image)
         {
             Image=image;
-            Pass("Rarity",DiscoverRarity);Pass("Health",DiscoverHealth);Pass("Native text",DiscoverNativeText);Pass("Run",DiscoverRun);Pass("Coop",DiscoverCoop);
-            Pass("Xp",DiscoverXp);Pass("Choose",DiscoverChoose);Pass("Prices",DiscoverPrices);
+            Pass("Rarity",DiscoverRarity);Pass("Health",DiscoverHealth);Pass("Native text",DiscoverNativeText);
+            foreach(string key in new[]{"time","xp"}){string label=key;Pass("UI "+label,()=>DiscoverUiField(label));}
+            Pass("Run",DiscoverRun);Pass("Coop",DiscoverCoop);
+            Pass("Choose",DiscoverChoose);
+            foreach(string name in UiLabels){string key=name;Pass("UI "+key,()=>DiscoverUiField(key));}
+            Pass("Xp",DiscoverXp);Pass("Prices",DiscoverPrices);
             foreach(string name in UiLabels){string key=name;Pass("UI "+key,()=>DiscoverUiField(key));}
             Pass("Profile",DiscoverProfile);ValidateTextOwners();ValidateRoles();ResolvePhase();Pass("Stat units",DiscoverStatUnits);cache.Clear();
             foreach(string role in new[]{"Xp","Choose"})
@@ -256,6 +260,22 @@ namespace AzerothTrainer
             if(Functions.ContainsKey("Spell")&&Functions.ContainsKey("Jewelry"))Failures.Remove("Rarity");
         }
         string Failure(string name){string reason;return Failures.TryGetValue(name,out reason)?reason:"No matching instruction shape.";}
+        int UiKnown(string name)
+        {
+            Dictionary<string,int> evidence;if(!Fields.TryGetValue(name,out evidence))return -1;
+            var values=evidence.Where(w=>w.Key.StartsWith("UI:")&&Functions.ContainsKey(w.Key)).Select(w=>w.Value).Distinct().ToArray();return values.Length==1?values[0]:-1;
+        }
+        void DependOnUi(DecodedCode code,string name)
+        {
+            Dictionary<string,int> evidence;if(!Fields.TryGetValue(name,out evidence))return;
+            foreach(string role in evidence.Keys.Where(k=>k.StartsWith("UI:")&&Functions.ContainsKey(k)))
+            {
+                var witness=Functions[role];int size;code.Dependencies.TryGetValue(witness.Function.Start,out size);
+                code.Dependencies[witness.Function.Start]=Math.Max(size,witness.Function.Length);
+                foreach(var span in witness.Dependencies.ToArray())
+                {code.Dependencies.TryGetValue(span.Key,out size);code.Dependencies[span.Key]=Math.Max(size,span.Value);}
+            }
+        }
         int Known(string name){return KnownFrom(name,false);}
         int KnownFrom(string name,bool independent)
         {
@@ -314,6 +334,7 @@ namespace AzerothTrainer
             var candidates=Referencing(key);
             foreach(var code in candidates)
                 try{matches+=InspectUiField(code,key);}catch(Exception ex){reason=" Candidate 0x"+code.Function.Start.ToString("x")+": "+ex.Message;}
+            if(matches>0)Failures.Remove("UI "+key);
             Need(matches>0,"No owner-proven native UI value for '"+key+"'."+reason);
         }
         int InspectUiField(DecodedCode code,string key)
@@ -540,26 +561,37 @@ namespace AzerothTrainer
         internal int RunOwnerRegister=1,RunTimeRegister=1;
         void DiscoverRun()
         {
-            var anchored=Referencing("WOW_ROGUE_SINK_AT").ToArray();var candidates=new List<DecodedCode>();
-            foreach(var code in (anchored.Length>0?anchored.AsEnumerable():Anchored(new byte[]{0x80,0xb9})))
+            var anchored=Referencing("WOW_ROGUE_SINK_AT").ToArray();var candidates=new List<DecodedCode>();int clock=UiKnown("clock");
+            var hosts=RunNominations(anchored,clock);
+            foreach(var code in anchored.Concat(hosts).GroupBy(c=>c.Function.Start).Select(g=>g.First()))
             try
             {
                 var ins=code.Instructions;
-                bool owner=ins.Any(i=>i.MemoryBase!=Register.None&&code.Flow.Argument(code.Index(i.IP),i.MemoryBase,0));
-                Need(owner,"No memory owner traced to the incoming Game argument.");
-                Need(Enumerable.Range(0,ins.Length).Any(p=>ClockStore(code,p)),"No Game clock store with field + incoming frame-time provenance.");
+                if(!ins.Any(i=>i.Mnemonic==Mnemonic.Movss&&i.Op0Kind==OpKind.Memory&&i.MemoryIndex==Register.None&&(clock<0||DecodedCode.Disp(i)==clock)))continue;
+                Need(Enumerable.Range(0,ins.Length).Any(p=>RunClockStore(code,p,clock)),"No store to the Game clock established by the HUD or frame-time expression.");
+                var info=new InstructionInfoFactory();
+                Need(Enumerable.Range(0,ins.Length).Any(p=>{var i=ins[p];return DecodedCode.Info(info,ref i).GetUsedRegisters().Any(r=>DecodedCode.Read(r.Access)&&IsFrameTime(code.Flow.At(p,r.Register)));}),"No use of the incoming frame-time argument.");
                 candidates.Add(code);
             }
-            catch(Exception ex){Failures["Run candidate 0x"+code.Function.Start.ToString("x")]=ex.Message;}
-            var preferred=candidates.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)candidates=preferred.ToList();
-            if(candidates.Count!=1){Failures["Run"]="Semantic run candidates: "+candidates.Count+". "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
-            var run=candidates[0];var list=run.Instructions;Functions["Run"]=run;var healingTargets=new HashSet<int>();var clockTargets=new List<int>();var stateGuards=new List<int>();
+            catch(Exception ex){if(anchored.Any(a=>a.Function.Start==code.Function.Start))Failures["Run candidate 0x"+code.Function.Start.ToString("x")]=ex.Message;}
+            // Both updates write the same clock. A forwarded update is a child,
+            // never the solo host, even when only its instruction shape survives.
+            var children=new HashSet<int>(candidates.SelectMany(c=>TimeDispatches(c).Select(p=>(int)c.Instructions[p].NearBranchTarget)));
+            var roots=candidates.Where(c=>!children.Contains(c.Function.Start)).ToArray();
+            var parents=roots.Where(c=>candidates.Any(other=>other.Function.Start!=c.Function.Start&&TimeDispatches(c).Any(p=>c.Instructions[p].NearBranchTarget==(ulong)other.Function.Start))).ToArray();
+            if(parents.Length>0)roots=parents;
+            var preferred=roots.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;else if(parents.Length==0)roots=roots.Where(c=>!CoopStateBody(c)).ToArray();
+            if(roots.Length!=1){Failures["Run"]="Semantic run roots: "+roots.Length+" from "+candidates.Count+" clock writers; dispatch targets are excluded. "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
+            var nominated=candidates.ToArray();candidates=roots.ToList();
+            var run=candidates[0];var list=run.Instructions;Functions["Run"]=run;DependOnUi(run,"clock");
+            foreach(var child in nominated.Where(c=>children.Contains(c.Function.Start)).ToArray())if(TimeDispatches(run).Any(p=>list[p].NearBranchTarget==(ulong)child.Function.Start))run.Dependencies[child.Function.Start]=child.Function.Length;
+            var healingTargets=new HashSet<int>();var clockTargets=new List<int>();var stateGuards=new List<int>();
             for(int p=0;p<list.Length;p++)
             {
                 var i=list[p];if(i.MemoryIndex!=Register.None||!run.Flow.Argument(p,i.MemoryBase,0))continue;
                 if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&i.MemorySize.GetSize()==1&&ByteImmediate(i))stateGuards.Add(p);
                 if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movzx&&i.MemorySize.GetSize()==1&&list[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(list[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&ByteImmediate(list[p+1]))stateGuards.Add(p);
-                if(ClockStore(run,p)){Field("clock",DecodedCode.Disp(i),"Run");clockTargets.Add(p);}
+                if(RunClockStore(run,p,clock)){Field("clock",DecodedCode.Disp(i),"Run");clockTargets.Add(p);}
                 if(p+1<list.Length&&i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory&&DecodedCode.Disp(i)==Known("maxHp")&&Store(list[p+1],Mnemonic.Movss,i.MemoryBase,DecodedCode.Disp(list[p+1]),i.Op0Register)&&DecodedCode.Disp(list[p+1])!=Known("maxHp"))healingTargets.Add(DecodedCode.Disp(list[p+1]));
             }
             if(healingTargets.Count==1)Field("hp",healingTargets.First(),"Run");
@@ -575,7 +607,7 @@ namespace AzerothTrainer
                 if(list[guard].Mnemonic!=Mnemonic.Cmp||value>=0)Phase(DecodedCode.Disp(list[guard]),"Run",value);
             }
             var dispatches=Enumerable.Range(0,list.Length).Where(p=>IsCoopDispatch(run,p)).ToArray();
-            var coverage=dispatches.Concat(clockTargets).Concat(Enumerable.Range(0,list.Length).Where(p=>list[p].IP<(ulong)(run.Function.Start+512)&&list[p].FlowControl==FlowControl.UnconditionalBranch&&list[p].Op0Kind==OpKind.NearBranch64&&(list[p].NearBranchTarget<(ulong)run.Function.Start||list[p].NearBranchTarget>=(ulong)(run.Function.Start+run.Function.Length)))).Distinct().ToArray();
+            var coverage=dispatches.Concat(clockTargets).Concat(TimeDispatches(run)).Distinct().ToArray();
             var errors=new List<string>();
             for(int first=Math.Max(0,run.Index((ulong)(run.Function.Start+Image.UnwindInfo(run.Function)[1])));first<list.Length&&list[first].IP<(ulong)(run.Function.Start+512);first++)
             {
@@ -587,18 +619,54 @@ namespace AzerothTrainer
             }
             Failures["RunHook"]="Run fields recognized, but no safe window with Game/frame-time provenance: "+String.Join("; ",errors.GroupBy(e=>e.Substring(e.IndexOf(": ",StringComparison.Ordinal)+2)).Take(8).Select(g=>g.First()).ToArray());
         }
-        static bool IsCoopDispatch(DecodedCode code,int at,int expected=-1)
+        IEnumerable<DecodedCode> RunNominations(DecodedCode[] anchored,int clock)
+        {
+            if(clock>=0){foreach(var code in Anchored(BitConverter.GetBytes(clock)))yield return code;yield break;}
+            var seeds=anchored.Where(c=>Enumerable.Range(0,c.Instructions.Length).Any(p=>ClockStore(c,p))).ToArray();
+            if(seeds.Length>0)
+            {
+                foreach(var code in seeds)
+                {
+                    yield return code;
+                    foreach(int call in TimeDispatches(code))
+                    {var f=Image.FunctionAt((int)code.Instructions[call].NearBranchTarget);if(f==null||f.Start!=(int)code.Instructions[call].NearBranchTarget)continue;DecodedCode target;try{target=Decode(f);}catch{continue;}yield return target;}
+                }
+                yield break;
+            }
+            foreach(var code in Anchored(new byte[]{0xf3,0x0f,0x11}))
+                if(code.Instructions.Any(i=>i.Mnemonic==Mnemonic.Addss)&&code.Instructions.Any(i=>i.Mnemonic==Mnemonic.Movss&&i.Op0Kind==OpKind.Memory&&DecodedCode.Disp(i)>=0x100&&DecodedCode.Disp(i)<0x10000))yield return code;
+        }
+        readonly Dictionary<int,int[]> timeDispatches=new Dictionary<int,int[]>();
+        int[] TimeDispatches(DecodedCode code)
+        {
+            int[] result;if(timeDispatches.TryGetValue(code.Function.Start,out result))return result;var ins=code.Instructions;
+            result=Enumerable.Range(0,ins.Length).Where(p=>(ins[p].FlowControl==FlowControl.Call||ins[p].FlowControl==FlowControl.UnconditionalBranch)&&ins[p].Op0Kind==OpKind.NearBranch64&&(ins[p].NearBranchTarget<(ulong)code.Function.Start||ins[p].NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length))&&code.Flow.Argument(p,Register.RCX,0)&&IsFrameTime(code.Flow.At(p,Register.XMM1))).ToArray();timeDispatches[code.Function.Start]=result;return result;
+        }
+        static bool CoopStateBody(DecodedCode code)
+        {
+            var ins=code.Instructions;
+            for(int p=0;p+1<ins.Length&&ins[p].IP<(ulong)(code.Function.Start+256);p++)
+                if(ins[p].Mnemonic==Mnemonic.Movzx&&ins[p].Op0Register==Register.EAX&&ins[p].MemorySize.GetSize()==1&&code.Flow.Argument(p,ins[p].MemoryBase,0)&&RR(ins[p+1],Mnemonic.Test,Register.AL,Register.AL))return true;
+            return false;
+        }
+        bool IsCoopDispatch(DecodedCode code,int at,int expected=-1)
         {
             var ins=code.Instructions;var i=ins[at];
-            if(at+1>=ins.Length||i.Mnemonic!=Mnemonic.Cmp||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||!DecodedCode.Immediate(i,1,0)||i.IP>=(ulong)(code.Function.Start+512))return false;
+            if(at+1>=ins.Length||i.Mnemonic!=Mnemonic.Cmp||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||!DecodedCode.Immediate(i,1,0)||i.IP>=(ulong)(code.Function.Start+512)||!code.Flow.Argument(at,i.MemoryBase,0))return false;
             int branch=at+1;while(branch<Math.Min(ins.Length,at+6)&&ins[branch].FlowControl==FlowControl.Next&&ins[branch].RflagsModified==0)branch++;
-            if(branch>=ins.Length||ins[branch].FlowControl!=FlowControl.ConditionalBranch)return false;
-            ulong target=ins[branch].NearBranchTarget;
-            return ins.Skip(branch+1).TakeWhile(x=>x.IP<target).Any(x=>(x.FlowControl==FlowControl.UnconditionalBranch||x.FlowControl==FlowControl.Call)&&x.Op0Kind==OpKind.NearBranch64&&(x.NearBranchTarget<(ulong)code.Function.Start||x.NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length))&&(expected<0||x.NearBranchTarget==(ulong)expected))&&code.Flow.Argument(at,i.MemoryBase,0);
+            if(branch>=ins.Length||ins[branch].Mnemonic!=Mnemonic.Je&&ins[branch].Mnemonic!=Mnemonic.Jne)return false;
+            int target=code.Index(ins[branch].NearBranchTarget),zero=ins[branch].Mnemonic==Mnemonic.Je?target:branch+1,nonzero=ins[branch].Mnemonic==Mnemonic.Jne?target:branch+1;
+            foreach(int call in TimeDispatches(code).Where(p=>expected<0||ins[p].NearBranchTarget==(ulong)expected))
+                if(code.ReachesBefore(nonzero,at,new[]{call})==true&&code.ReachesBefore(zero,at,new[]{call})==false)return true;
+            return false;
+        }
+        static bool RunClockStore(DecodedCode code,int at,int clock)
+        {
+            var i=code.Instructions[at];return clock<0?ClockStore(code,at):i.Mnemonic==Mnemonic.Movss&&i.Op0Kind==OpKind.Memory&&i.MemoryIndex==Register.None&&DecodedCode.Disp(i)==clock&&code.Flow.Argument(at,i.MemoryBase,0);
         }
         static bool ClockStore(DecodedCode code,int at)
         {
-            var i=code.Instructions[at];if(i.Mnemonic!=Mnemonic.Movss||i.Op0Kind!=OpKind.Memory||i.MemoryIndex!=Register.None||!code.Flow.Argument(at,i.MemoryBase,0))return false;
+            var i=code.Instructions[at];if(DecodedCode.Disp(i)<0x100||DecodedCode.Disp(i)>=0x10000||i.Mnemonic!=Mnemonic.Movss||i.Op0Kind!=OpKind.Memory||i.MemoryIndex!=Register.None||!code.Flow.Argument(at,i.MemoryBase,0))return false;
             var value=code.Flow.At(at,i.Op1Register);return value!=null&&value.Clock(DecodedCode.Disp(i));
         }
         static bool IsFrameTime(RegisterFlow.Value value){return value!=null&&value.Root==8&&value.Offset==1;}
@@ -609,23 +677,24 @@ namespace AzerothTrainer
         {
             // Discover the award independently. Text is not certified yet and
             // must neither choose this offset nor corroborate itself through it.
-            var candidates=new List<Tuple<DecodedCode,int,int,int>>();
+            var candidates=new List<Tuple<DecodedCode,int,int,int>>();int uiXp=UiKnown("xp");
+            var uiHosts=uiXp<0?new HashSet<int>():new HashSet<int>(Image.Find(BitConverter.GetBytes(uiXp),true).Select(Image.FunctionAt).Where(f=>f!=null).Select(f=>f.Start));
             foreach(var f in Image.Functions.Where(f=>f.Length>100&&f.Length<16000))
             {
-                byte[] prefix=Image.Read(f.Start,Math.Min(f.Length,256));bool possible=false;
+                byte[] prefix=Image.Read(f.Start,Math.Min(f.Length,256));bool possible=uiHosts.Contains(f.Start);
                 for(int p=0;!possible&&p+1<prefix.Length;p++)
                     if((prefix[p]==0x89||prefix[p]==0x01)&&(prefix[p+1]&0xf8)==0xd0||prefix[p]==0x03&&(prefix[p+1]&0x38)==0x10)possible=true;
                 if(!possible)continue;DecodedCode code;try{code=Decode(f);}catch{continue;}var ins=code.Instructions;
-                if(!ins.Any(i=>i.Mnemonic==Mnemonic.Add&&i.Op0Kind==OpKind.Register&&i.Op0Register.GetSize()==4&&(i.Op1Kind==OpKind.Register||i.Op1Kind==OpKind.Memory)))continue;
+                if(!ins.Any(i=>(i.Mnemonic==Mnemonic.Add&&(i.Op0Kind==OpKind.Memory&&i.MemorySize.GetSize()==4||i.Op0Kind==OpKind.Register&&i.Op0Register.GetSize()==4)||i.Mnemonic==Mnemonic.Lea&&i.Op0Register.GetSize()==4)))continue;
                 for(int at=0;at<ins.Length&&ins[at].IP<(ulong)(f.Start+512);at++)
                 {
-                    var store=ins[at];if(store.Mnemonic!=Mnemonic.Mov||store.Op0Kind!=OpKind.Memory||store.MemoryIndex!=Register.None||store.MemorySize.GetSize()!=4||store.Op1Kind!=OpKind.Register)continue;
+                    var store=ins[at];if(store.Mnemonic!=Mnemonic.Mov&&store.Mnemonic!=Mnemonic.Add||store.Op0Kind!=OpKind.Memory||store.MemoryIndex!=Register.None||store.MemorySize.GetSize()!=4||store.Op1Kind!=OpKind.Register)continue;
                     try
                     {
-                        int offset=DecodedCode.Disp(store);if(offset<0x100||offset>=0x10000||!code.Flow.Argument(at,store.MemoryBase,0))continue;var value=code.Flow.At(at,store.Op1Register);
+                        int offset=DecodedCode.Disp(store);if(offset<0x100||offset>=0x10000||!code.Flow.Argument(at,store.MemoryBase,0))continue;var value=code.Flow.StoredValue(at);
                         if(value==null||!value.Snapshot||value.Root!=20||value.Floating||!XpSum(value.Left,value.Right,offset)&&!XpSum(value.Right,value.Left,offset))continue;
                         int capture=-1;var factory=new InstructionInfoFactory();
-                        for(int p=0;p<at;p++)
+                        for(int p=0;p<=at;p++)
                         {
                             var i=ins[p];if(!XpAward(code.Flow.At(p,Register.RDX)))continue;
                             if(DecodedCode.Info(factory,ref i).GetUsedRegisters().Any(r=>DecodedCode.Full(r.Register)==Register.RDX&&DecodedCode.Read(r.Access))){capture=p;break;}
@@ -635,12 +704,15 @@ namespace AzerothTrainer
                     catch(Exception ex){Failures["Xp candidate 0x"+f.Start.ToString("x")]=ex.Message;}
                 }
             }
-            if(candidates.Count!=1){Failures["Xp"]="Expected one semantic XP award entry; found "+candidates.Count+".";return;}
-            var match=candidates[0];Functions["Xp"]=match.Item1;Field("xp",match.Item4,"Xp");var errors=new List<string>();
+            int expected=UiKnown("xp");int count=candidates.Count;
+            var entries=candidates.Where(c=>expected>=0&&c.Item4==expected).GroupBy(c=>c.Item1.Function.Start).ToArray();
+            if(entries.Length!=1){Failures["Xp"]="Expected one award entry matching validated UI:xp; found "+entries.Length+" of "+count+" semantic adders.";return;}
+            candidates=entries[0].OrderBy(c=>c.Item2).ToList();var coverage=candidates.SelectMany(c=>new[]{c.Item2,c.Item3}).Distinct().ToArray();
+            var match=candidates[0];Functions["Xp"]=match.Item1;DependOnUi(match.Item1,"xp");Field("xp",match.Item4,"Xp");var errors=new List<string>();
             for(int first=match.Item2;first>=Math.Max(0,match.Item1.Index((ulong)(match.Item1.Function.Start+Image.UnwindInfo(match.Item1.Function)[1])));first--)
             {
                 if(!match.Item1.Flow.Argument(first,Register.RCX,0)||!XpAward(match.Item1.Flow.At(first,Register.RDX)))continue;
-                try{Need(match.Item1.Dominates(first,match.Item2,match.Item3),"XP window does not dominate the award capture and store.");foreach(int size in new[]{12,6})try{int last=Cover(match.Item1,first,size);match.Item1.DeadAfter(first,Register.RAX);Sites["XpHook"]=Site("XpHook",match.Item1,first,last,last);return;}catch{if(size==6)throw;}}
+                try{Need(match.Item1.Dominates(first,coverage),"XP window does not dominate the award capture and store.");foreach(int size in new[]{12,6})try{int last=Cover(match.Item1,first,size);match.Item1.DeadAfter(first,Register.RAX);Sites["XpHook"]=Site("XpHook",match.Item1,first,last,last);return;}catch{if(size==6)throw;}}
                 catch(Exception ex){errors.Add(ex.Message);}
             }
             Failures["XpHook"]="XP award identified; multiplier patch refused: "+String.Join("; ",errors.Distinct().Take(8).ToArray());
@@ -648,14 +720,14 @@ namespace AzerothTrainer
         void DiscoverCoop()
         {
             DecodedCode run;if(!Functions.TryGetValue("Run",out run))return;
-            var targets=run.Instructions.Where(i=>i.IP<(ulong)(run.Function.Start+512)&&(i.FlowControl==FlowControl.UnconditionalBranch||i.FlowControl==FlowControl.Call)&&i.Op0Kind==OpKind.NearBranch64&&
+            var targets=run.Instructions.Where(i=>(i.FlowControl==FlowControl.UnconditionalBranch||i.FlowControl==FlowControl.Call)&&i.Op0Kind==OpKind.NearBranch64&&
                 (i.NearBranchTarget<(ulong)run.Function.Start||i.NearBranchTarget>=(ulong)(run.Function.Start+run.Function.Length))).Select(i=>Image.FunctionAt(checked((int)i.NearBranchTarget))).Where(f=>f!=null).ToArray();
             var candidates=new List<Tuple<DecodedCode,int,int>>();
             foreach(var f in targets.GroupBy(t=>t.Start).Select(g=>g.First()))
             {
                 if(!Enumerable.Range(0,run.Instructions.Length).Any(p=>IsCoopDispatch(run,p,f.Start)))continue;
                 DecodedCode code;try{code=Decode(f);}catch{continue;}var ins=code.Instructions;
-                var clocks=Enumerable.Range(0,ins.Length).Where(p=>ClockStore(code,p)&&DecodedCode.Disp(ins[p])==Known("clock")).ToArray();if(clocks.Length==0)continue;
+                var clocks=Enumerable.Range(0,ins.Length).Where(p=>RunClockStore(code,p,Known("clock"))).ToArray();if(clocks.Length==0)continue;
                 for(int at=0;at+1<ins.Length&&ins[at].IP<(ulong)(f.Start+256);at++)
                 {
                     var state=ins[at];if(state.Mnemonic!=Mnemonic.Movzx||state.Op0Register!=Register.EAX||state.MemorySize.GetSize()!=1||!code.Flow.Argument(at,state.MemoryBase,0)||!RR(ins[at+1],Mnemonic.Test,Register.AL,Register.AL))continue;
@@ -669,7 +741,7 @@ namespace AzerothTrainer
             {
                 var match=candidates[0];Functions["Coop"]=match.Item1;Field("coopPhase",match.Item2,"Coop");CoopRunningState=match.Item3;
                 foreach(int p in Enumerable.Range(0,run.Instructions.Length).Where(p=>IsCoopDispatch(run,p,match.Item1.Function.Start)))Field("coop",DecodedCode.Disp(run.Instructions[p]),"Run");
-                foreach(int p in Enumerable.Range(0,match.Item1.Instructions.Length).Where(p=>ClockStore(match.Item1,p)))Field("clock",DecodedCode.Disp(match.Item1.Instructions[p]),"Coop");
+                foreach(int p in Enumerable.Range(0,match.Item1.Instructions.Length).Where(p=>RunClockStore(match.Item1,p,Known("clock"))))Field("clock",DecodedCode.Disp(match.Item1.Instructions[p]),"Coop");
                 return;
             }
             Failures["Coop"]="Co-op state and clock could not be tied uniquely to a run call or tail jump.";

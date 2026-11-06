@@ -12,6 +12,7 @@ namespace AzerothTrainer
         internal readonly Dictionary<int,int> Dependencies=new Dictionary<int,int>();
         readonly Dictionary<ulong,int> indices=new Dictionary<ulong,int>();
         readonly Dictionary<int,int[]> jumpTables=new Dictionary<int,int[]>();
+        readonly HashSet<int> discardedTableTargets=new HashSet<int>();
         RegisterFlow flow;
         internal RegisterFlow Flow {get{return flow??(flow=new RegisterFlow(this));}}
         delegate InstructionInfo ReadInfo(InstructionInfoFactory factory,ref Instruction instruction);
@@ -60,22 +61,35 @@ namespace AzerothTrainer
                 int guard;int count=TableBound(load,at,out guard);
 
                 ulong boundary=Instructions.Where(i=>i.Mnemonic==Mnemonic.Lea&&i.IsIPRelativeMemoryOperand&&i.IPRelativeMemoryAddress>(ulong)address).Select(i=>i.IPRelativeMemoryAddress).DefaultIfEmpty(UInt64.MaxValue).Min();
-                // LLVM emits contiguous signed offsets relative to the table.
-                // Include non-boundary targets here so CheckSite rejects them.
+                // Without a guard, adjacent data can resemble more relative
+                // entries. Keep walking past non-instructions, retaining every
+                // decoded target; guarded tables remain strict.
+                bool unbounded=count<0&&!HasTableGuard(load);int read=0;
                 for(int entry=0;entry<(count>0?count:1024);entry++)
                 {
                     if(count<0&&(ulong)address+(uint)entry*4>=boundary)break;
-                    int destination;try{destination=checked(address+BitConverter.ToInt32(Image.Read(checked(address+entry*4),4),0));}catch{break;}
+                    int destination;try{byte[] entryBytes=Image.Read(checked(address+entry*4),4);read=entry+1;destination=checked(address+BitConverter.ToInt32(entryBytes,0));}catch{break;}
                     if(destination<Function.Start||destination>=Function.Start+Function.Length)break;
-                    targets.Add(destination);
+                    if(!unbounded||Index((ulong)destination)>=0)targets.Add(destination);else discardedTableTargets.Add(destination);
                 }
-                if(targets.Count==0||targets.Count==1024||count>0&&targets.Count!=count)continue;
-                Dependencies[address]=checked(targets.Count*4);
+                if(targets.Count==0||read==1024||count>0&&targets.Count!=count)continue;
+                Dependencies[address]=checked(read*4);
                 jumpTables[at]=targets.Distinct().ToArray();if(count>0)windows[at]=Tuple.Create(guard,load);
             }
             var incoming=jumpTables.Values.SelectMany(t=>t).ToArray();
             foreach(var window in windows)
                 if(incoming.Any(target=>(ulong)target>Instructions[window.Value.Item1].IP&&(ulong)target<=Instructions[window.Value.Item2].IP))jumpTables.Remove(window.Key);
+        }
+        bool HasTableGuard(int load)
+        {
+            Register index=Full(Instructions[load].MemoryIndex);
+            for(int p=Math.Max(0,load-64);p<load;p++)
+            {
+                var i=Instructions[p];if(i.Mnemonic!=Mnemonic.Cmp||i.Op0Kind!=OpKind.Register||Full(i.Op0Register)!=index||i.Op1Kind==OpKind.Memory||i.Op1Kind==OpKind.Register)continue;
+                int branch=p+1;while(branch<load&&Instructions[branch].FlowControl==FlowControl.Next&&Instructions[branch].RflagsModified==0)branch++;
+                if(branch<load&&(Instructions[branch].Mnemonic==Mnemonic.Ja||Instructions[branch].Mnemonic==Mnemonic.Jae||Instructions[branch].Mnemonic==Mnemonic.Jbe||Instructions[branch].Mnemonic==Mnemonic.Jb))return true;
+            }
+            return false;
         }
         int TableBound(int load,int jump,out int compare)
         {
@@ -330,6 +344,7 @@ namespace AzerothTrainer
             foreach(var i in Instructions)
                 if((i.FlowControl==FlowControl.ConditionalBranch||i.FlowControl==FlowControl.UnconditionalBranch)&&i.NearBranchTarget>begin&&i.NearBranchTarget<end&&
                     !(bypassEnd>0&&i.IP>=begin&&i.IP<Instructions[bypassEnd].IP))throw new Exception("A branch outside the replaced decision tree enters patched bytes.");
+            if(discardedTableTargets.Any(target=>(ulong)target>begin&&(ulong)target<end))throw new Exception("An unbounded table contains a non-instruction target inside patched bytes.");
             foreach(var jump in jumpTables)foreach(int target in jump.Value)
                 if((ulong)target>begin&&(ulong)target<end)throw new Exception("A decoded jump-table target enters patched bytes.");
             foreach(var i in Instructions.Where(i=>i.FlowControl==FlowControl.IndirectBranch))

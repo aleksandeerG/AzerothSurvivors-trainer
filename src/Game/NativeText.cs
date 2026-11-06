@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Linq;
 using Iced.Intel;
 namespace AzerothTrainer
 {
@@ -67,7 +68,7 @@ namespace AzerothTrainer
                 byte tag=image.Read(at++,1)[0];
                 if(tag==0){length=at-address;return keys.ToArray();}
                 if(tag<128)
-                {literal+=Encoding.ASCII.GetString(image.Read(at,tag));at+=tag;continue;}
+                {literal+=Encoding.UTF8.GetString(image.Read(at,tag));at+=tag;continue;}
                 if(tag!=0xc0&&tag!=0xc1&&tag!=0xc5)throw new Exception("Unsupported native format tag; sequential argument order is unproven.");
                 bool supported=true;
                 if(tag!=0xc0)
@@ -76,13 +77,13 @@ namespace AzerothTrainer
                     if(tag==0xc5){supported&=BitConverter.ToUInt16(image.Read(at,2),0)<=9;at+=2;}
                 }
                 // Flags and precision change presentation, not the sequential
-                // record index. Recover only the final identifier before '='.
+                // record index. A key may follow punctuation, never another name.
                 string key="";string text=literal.TrimEnd();
                 if(supported&&text.EndsWith("=",StringComparison.Ordinal))
                 {
                     int end=text.Length-1,start=end;
                     while(start>0&&(text[start-1]=='_'||Char.IsLetterOrDigit(text[start-1])))start--;
-                    if(start<end)key=text.Substring(start,end-start);
+                    if(start<end&&text.Substring(0,start).All(c=>Char.IsWhiteSpace(c)||Char.IsPunctuation(c)))key=text.Substring(start,end-start);
                 }
                 if(key.Length>0&&!seen.Add(key))
                 {for(int n=0;n<keys.Count;n++)if(keys[n]==key)keys[n]="";key="";}
