@@ -8,9 +8,13 @@ namespace AzerothTrainer
     static class Native
     {
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("ntdll.dll")] internal static extern IntPtr RtlVirtualUnwind(uint type,ulong image,ulong pc,IntPtr function,IntPtr context,out IntPtr data,out ulong frame,IntPtr pointers);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool ReadProcessMemory(IntPtr h, IntPtr address, byte[] bytes, UIntPtr length, out UIntPtr read);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool WriteProcessMemory(IntPtr h, IntPtr address, byte[] bytes, UIntPtr length, out UIntPtr written);
+        [StructLayout(LayoutKind.Sequential)] internal struct MemoryRegion
+        {internal IntPtr BaseAddress,AllocationBase;internal uint AllocationProtect;internal UIntPtr RegionSize;internal uint State,Protect,Type;}
+        [DllImport("kernel32.dll", SetLastError=true)] internal static extern UIntPtr VirtualQueryEx(IntPtr h,IntPtr address,out MemoryRegion information,UIntPtr size);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern IntPtr VirtualAllocEx(IntPtr h, IntPtr address, UIntPtr size, uint type, uint protect);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool VirtualFreeEx(IntPtr h, IntPtr address, UIntPtr size, uint type);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool VirtualProtectEx(IntPtr h, IntPtr address, UIntPtr size, uint protect, out uint old);

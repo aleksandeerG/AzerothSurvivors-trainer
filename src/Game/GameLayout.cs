@@ -93,7 +93,7 @@ namespace AzerothTrainer
                 try
                 {
                     trialFeatures=new HashSet<TrainerFeature>{feature};if(feature==TrainerFeature.CoopAutoPick)trialFeatures.Add(TrainerFeature.AutoPick);
-                    var cave=new IntPtr(0x200000000L);var image=new IntPtr(0x140000000L);byte[] generated;
+                    var cave=new IntPtr(0x150000000L);var image=new IntPtr(0x140000000L);byte[] generated;
                     if(feature==TrainerFeature.SpellChance||feature==TrainerFeature.ItemChance)
                     {
                         foreach(string name in feature==TrainerFeature.SpellChance?new[]{"Spell"}:new[]{"Jewelry1","Jewelry2"})
@@ -102,7 +102,7 @@ namespace AzerothTrainer
                     if(feature==TrainerFeature.RerollCost)continue;
                     string hook=feature==TrainerFeature.HealthFloor?"HealthHook":feature==TrainerFeature.XpScaling?"XpHook":feature==TrainerFeature.ClassProgression||feature==TrainerFeature.ClassMarks?"ProfileHook":"RunHook";
                     var context=Site(hook);IntPtr next=Native.Add(image,context.Continuation);
-                    generated=hook=="HealthHook"?HealthCode.Build(next,this):hook=="XpHook"?XpCode.Build(next,this):hook=="ProfileHook"?ProfileCode.Build(cave,next,image,this):RunCode.Build(cave,next,image,this);
+                    generated=hook=="HealthHook"?HealthCode.Build(next,this):hook=="XpHook"?XpCode.Build(next,this,cave,image):hook=="ProfileHook"?ProfileCode.Build(cave,next,image,this):RunCode.Build(cave,next,image,this);
                     CheckBuild(context,generated);
                 }
                 catch(Exception ex){unavailable[feature]="Hook trial build refused: "+ex.Message;}
@@ -111,18 +111,18 @@ namespace AzerothTrainer
             // Also build the complete combination that Apply will install.
             try
             {
-                if(Supports(TrainerFeature.RunControls))CheckBuild(Site("RunHook"),RunCode.Build(new IntPtr(0x200000000L),new IntPtr(0x140000000L+Site("RunHook").Continuation),new IntPtr(0x140000000L),this));
+                if(Supports(TrainerFeature.RunControls))CheckBuild(Site("RunHook"),RunCode.Build(new IntPtr(0x150000000L),new IntPtr(0x140000000L+Site("RunHook").Continuation),new IntPtr(0x140000000L),this));
             }
             catch(Exception ex){foreach(var feature in dependencies.Where(p=>p.Value.Contains("Run")).Select(p=>p.Key).ToArray())unavailable[feature]="Combined run-hook trial refused: "+ex.Message;}
             try
             {
-                if(Supports(TrainerFeature.ClassProgression)||Supports(TrainerFeature.ClassMarks))CheckBuild(Site("ProfileHook"),ProfileCode.Build(new IntPtr(0x200000000L),new IntPtr(0x140000000L+Site("ProfileHook").Continuation),new IntPtr(0x140000000L),this));
+                if(Supports(TrainerFeature.ClassProgression)||Supports(TrainerFeature.ClassMarks))CheckBuild(Site("ProfileHook"),ProfileCode.Build(new IntPtr(0x150000000L),new IntPtr(0x140000000L+Site("ProfileHook").Continuation),new IntPtr(0x140000000L),this));
             }
             catch(Exception ex){unavailable[TrainerFeature.ClassProgression]=unavailable[TrainerFeature.ClassMarks]="Combined profile-hook trial refused: "+ex.Message;}
         }
         void CheckBuild(HookSite site,byte[] bytes)
         {
-            Need(bytes.Length>0&&bytes.Length<3500,"Generated hook exceeds its code allocation.");RarityCode.EntryJump(new IntPtr(0x200000000L),site.Original.Length);Need(Frame(site).Length<=96,"Generated unwind frame exceeds its allocation.");
+            Need(bytes.Length>0&&bytes.Length<3500,"Generated hook exceeds its code allocation.");RarityCode.EntryJump(new IntPtr(0x140000000L+site.Rva),new IntPtr(0x150000000L),site.Original.Length);Need(Frame(site).Length<=96,"Generated unwind frame exceeds its allocation.");
             var decoder=Decoder.Create(64,new ByteArrayCodeReader(bytes));
             while(decoder.IP<(ulong)bytes.Length){Instruction instruction;decoder.Decode(out instruction);Need(!instruction.IsInvalid&&instruction.NextIP<=(ulong)bytes.Length,"The trial hook contains an invalid instruction.");}
         }

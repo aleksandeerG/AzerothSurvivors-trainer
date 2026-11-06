@@ -4,8 +4,8 @@ using System.Text;
 using Iced.Intel;
 namespace AzerothTrainer
 {
-    // Supported Rust format bytecode: sequential arguments, literal spans and
-    // fixed float precision. Indexed arguments and unknown tags use HUD fallback.
+    // Sequential Rust argument records retain their index across presentation
+    // flags and separators. Unknown argument tags still require a fallback.
     internal static class NativeText
     {
         internal const string ReferenceKey="\0native-format";
@@ -13,8 +13,8 @@ namespace AzerothTrainer
         internal static bool RunLine(string[] keys){int count=0;foreach(string key in keys)if(Array.IndexOf(new[]{"t","lvl","xp","hpm","sh","gold","lives","rr"},key)>=0)count++;return count>=4;}
         internal static bool LooksLikeTemplate(byte[] bytes,int at,int available)
         {
-            int length=bytes[at];if(length<2||length>64||length+1>available||bytes[at+length]!='=')return false;
-            for(int p=1;p<length;p++){byte c=bytes[at+p];if(c!=';'&&c!=' '&&c!='_'&&!(c>='a'&&c<='z')&&!(c>='A'&&c<='Z')&&!(c>='0'&&c<='9'))return false;}
+            int length=bytes[at];if(length<2||length>=128||length+1>available||bytes[at+length]!='=')return false;
+            for(int p=1;p<=length;p++)if(bytes[at+p]<32||bytes[at+p]>126)return false;
             return true;
         }
         internal static bool Consumer(GameImage image,int target,DecodedCode witness)
@@ -28,13 +28,17 @@ namespace AzerothTrainer
                 for(int p=3;p+3<ins.Length;p++)
                 {
                     var dispatch=ins[p];if(dispatch.FlowControl!=FlowControl.IndirectCall||dispatch.Op0Kind!=OpKind.Memory||dispatch.MemoryIndexScale!=1||dispatch.MemoryIndex==Register.None||DecodedCode.Disp(dispatch)!=8||!writer.Flow.Argument(p,dispatch.MemoryBase,3))continue;
-                    Register index=dispatch.MemoryIndex;int scale=-1;
-                    for(int q=Math.Max(1,p-16);q<p;q++)if(ins[q].Mnemonic==Mnemonic.Shl&&ins[q].Op0Register==index&&DecodedCode.Immediate(ins[q],1,4)&&ins[q-1].Mnemonic==Mnemonic.Mov&&ins[q-1].Op0Register==index)scale=q;
-                    if(scale<0)continue;Register counter=ins[scale-1].Op1Register;
+                    Register index=dispatch.MemoryIndex,counter=Register.None;
+                    for(int q=Math.Max(1,p-16);q<p;q++){Register source=Stride(ins,q,index);if(source!=Register.None)counter=source;}
+                    if(counter==Register.None)continue;
                     bool consistent=true;int strides=0;
-                    for(int q=0;q+1<ins.Length;q++)
-                        if(ins[q].Mnemonic==Mnemonic.Mov&&ins[q].Op0Register==index&&ins[q].Op1Register==counter)
-                        {strides++;if(ins[q+1].Mnemonic!=Mnemonic.Shl||ins[q+1].Op0Register!=index||!DecodedCode.Immediate(ins[q+1],1,4))consistent=false;}
+                    for(int q=0;q<ins.Length;q++){Register source=Stride(ins,q,index);if(source!=Register.None){strides++;if(source!=counter)consistent=false;}}
+                    for(int q=0;q<ins.Length;q++)
+                    {
+                        var i=ins[q];if(i.Op0Register!=index)continue;
+                        if(i.Mnemonic==Mnemonic.Mov&&i.Op1Register==counter&&(q+1>=ins.Length||Stride(ins,q+1,index)!=counter))consistent=false;
+                        if(i.Mnemonic==Mnemonic.Imul&&i.Op1Register==counter&&Stride(ins,q,index)!=counter)consistent=false;
+                    }
                     if(!consistent||strides!=2)continue;
                     bool load=false;for(int q=p-3;q<p;q++)if(ins[q].Mnemonic==Mnemonic.Mov&&ins[q].Op0Register==Register.RCX&&ins[q].MemoryBase==dispatch.MemoryBase&&ins[q].MemoryIndex==index&&DecodedCode.Disp(ins[q])==0)load=true;
                     bool zero=false;foreach(var i in ins)if(DecodedCode.Zero(i)&&DecodedCode.Full(i.Op0Register)==DecodedCode.Full(counter))zero=true;
@@ -45,9 +49,19 @@ namespace AzerothTrainer
             }
             return false;
         }
+        static Register Stride(Instruction[] ins,int at,Register index)
+        {
+            var i=ins[at];if(i.Op0Register!=index)return Register.None;
+            if(i.Mnemonic==Mnemonic.Imul&&i.OpCount==3&&i.Op1Kind==OpKind.Register&&DecodedCode.Immediate(i,2,16))
+            {
+                if(i.Op1Register!=index)return i.Op1Register;
+            }
+            else if(i.Mnemonic!=Mnemonic.Shl||!DecodedCode.Immediate(i,1,4))return Register.None;
+            return at>0&&ins[at-1].Mnemonic==Mnemonic.Mov&&ins[at-1].Op0Register==index?ins[at-1].Op1Register:Register.None;
+        }
         internal static string[] Keys(GameImage image,int address,out int length)
         {
-            var keys=new List<string>();string literal="";int at=address;
+            var keys=new List<string>();var seen=new HashSet<string>();string literal="";int at=address;
             for(int budget=0;budget<256;budget++)
             {
                 byte tag=image.Read(at++,1)[0];
@@ -55,15 +69,24 @@ namespace AzerothTrainer
                 if(tag<128)
                 {literal+=Encoding.ASCII.GetString(image.Read(at,tag));at+=tag;continue;}
                 if(tag!=0xc0&&tag!=0xc1&&tag!=0xc5)throw new Exception("Unsupported native format tag; sequential argument order is unproven.");
+                bool supported=true;
                 if(tag!=0xc0)
                 {
-                    byte[] flags=image.Read(at,4);if(BitConverter.ToUInt32(flags,0)!=0x70000020)throw new Exception("Unsupported native format flags.");at+=4;
-                    if(tag==0xc5){if(BitConverter.ToUInt16(image.Read(at,2),0)>9)throw new Exception("Unsupported format precision.");at+=2;}
+                    supported=BitConverter.ToUInt32(image.Read(at,4),0)==0x70000020;at+=4;
+                    if(tag==0xc5){supported&=BitConverter.ToUInt16(image.Read(at,2),0)<=9;at+=2;}
                 }
-                string key=literal.Trim().TrimStart(';').Trim();
-                if(!key.EndsWith("=",StringComparison.Ordinal))throw new Exception("Native format argument has no key.");key=key.Substring(0,key.Length-1);
-                foreach(char c in key)if(c!='_'&&!Char.IsLetterOrDigit(c))throw new Exception("Native format key is ambiguous.");
-                if(key.Length==0||keys.Contains(key))throw new Exception("Duplicate or empty native format key.");keys.Add(key);literal="";
+                // Flags and precision change presentation, not the sequential
+                // record index. Recover only the final identifier before '='.
+                string key="";string text=literal.TrimEnd();
+                if(supported&&text.EndsWith("=",StringComparison.Ordinal))
+                {
+                    int end=text.Length-1,start=end;
+                    while(start>0&&(text[start-1]=='_'||Char.IsLetterOrDigit(text[start-1])))start--;
+                    if(start<end)key=text.Substring(start,end-start);
+                }
+                if(key.Length>0&&!seen.Add(key))
+                {for(int n=0;n<keys.Count;n++)if(keys[n]==key)keys[n]="";key="";}
+                keys.Add(key);literal="";
             }
             throw new Exception("Native format exceeds its bounded parser.");
         }

@@ -38,7 +38,7 @@ namespace AzerothTrainer
         }
         void ResolveTables()
         {
-            var factory=new InstructionInfoFactory();
+            var factory=new InstructionInfoFactory();var windows=new Dictionary<int,Tuple<int,int>>();
             for(int at=0;at<Instructions.Length;at++)
             {
                 var jump=Instructions[at];if(jump.FlowControl!=FlowControl.IndirectBranch||jump.Op0Kind!=OpKind.Register)continue;
@@ -57,20 +57,48 @@ namespace AzerothTrainer
                 }
                 if(address<0&&flow!=null){var value=flow.At(load,table);if(value!=null&&value.Root==6&&value.Offset<=Int32.MaxValue)address=(int)value.Offset;}
                 if(address<0)continue;var targets=new List<int>();
+                int guard;int count=TableBound(load,at,out guard);
+
                 ulong boundary=Instructions.Where(i=>i.Mnemonic==Mnemonic.Lea&&i.IsIPRelativeMemoryOperand&&i.IPRelativeMemoryAddress>(ulong)address).Select(i=>i.IPRelativeMemoryAddress).DefaultIfEmpty(UInt64.MaxValue).Min();
                 // LLVM emits contiguous signed offsets relative to the table.
                 // Include non-boundary targets here so CheckSite rejects them.
-                for(int entry=0;entry<1024;entry++)
+                for(int entry=0;entry<(count>0?count:1024);entry++)
                 {
-                    if((ulong)address+(uint)entry*4>=boundary)break;
+                    if(count<0&&(ulong)address+(uint)entry*4>=boundary)break;
                     int destination;try{destination=checked(address+BitConverter.ToInt32(Image.Read(checked(address+entry*4),4),0));}catch{break;}
                     if(destination<Function.Start||destination>=Function.Start+Function.Length)break;
                     targets.Add(destination);
                 }
-                if(targets.Count==0||targets.Count==1024)continue;
+                if(targets.Count==0||targets.Count==1024||count>0&&targets.Count!=count)continue;
                 Dependencies[address]=checked(targets.Count*4);
-                jumpTables[at]=targets.Distinct().ToArray();
+                jumpTables[at]=targets.Distinct().ToArray();if(count>0)windows[at]=Tuple.Create(guard,load);
             }
+            var incoming=jumpTables.Values.SelectMany(t=>t).ToArray();
+            foreach(var window in windows)
+                if(incoming.Any(target=>(ulong)target>Instructions[window.Value.Item1].IP&&(ulong)target<=Instructions[window.Value.Item2].IP))jumpTables.Remove(window.Key);
+        }
+        int TableBound(int load,int jump,out int compare)
+        {
+            compare=-1;Register index=Full(Instructions[load].MemoryIndex);if(index==Register.None)return -1;
+            var factory=new InstructionInfoFactory();
+            for(int p=load-1;p>=Math.Max(0,load-64);p--)
+            {
+                var i=Instructions[p];
+                if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Register&&Full(i.Op0Register)==index&&i.Op1Kind!=OpKind.Register&&i.Op1Kind!=OpKind.Memory)
+                {
+                    int branch=p+1;while(branch<load&&Instructions[branch].FlowControl==FlowControl.Next&&Instructions[branch].RflagsModified==0)branch++;
+                    if(branch>=load)return -1;var guard=Instructions[branch];
+                    if(guard.Mnemonic!=Mnemonic.Ja&&guard.Mnemonic!=Mnemonic.Jae)return -1;
+                    if(guard.NearBranchTarget>=Instructions[p].IP&&guard.NearBranchTarget<=Instructions[jump].IP)return -1;
+                    for(int q=branch+1;q<load;q++)if(Instructions[q].FlowControl!=FlowControl.Next)return -1;
+                    if(Instructions.Any(x=>(x.FlowControl==FlowControl.ConditionalBranch||x.FlowControl==FlowControl.UnconditionalBranch)&&x.Op0Kind==OpKind.NearBranch64&&x.NearBranchTarget>=guard.NextIP&&x.NearBranchTarget<=Instructions[load].IP&&(x.IP<i.IP||x.IP>Instructions[load].IP)))return -1;
+                    ulong size=i.GetImmediate(1)+(guard.Mnemonic==Mnemonic.Ja?1UL:0UL);
+                    compare=p;return size>0&&size<1024?(int)size:-1;
+                }
+                if(i.FlowControl!=FlowControl.Next&&i.FlowControl!=FlowControl.ConditionalBranch)return -1;
+                if(Info(factory,ref i).GetUsedRegisters().Any(r=>Full(r.Register)==index&&(Write(r.Access)||r.Access==OpAccess.CondWrite||r.Access==OpAccess.ReadCondWrite)))return -1;
+            }
+            return -1;
         }
         internal int Index(ulong ip){int index;return indices.TryGetValue(ip,out index)?index:-1;}
         internal bool Calls(int target){return Instructions.Any(i=>(i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&i.NearBranchTarget==(ulong)target);}

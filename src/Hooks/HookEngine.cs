@@ -21,6 +21,34 @@ namespace AzerothTrainer
             var b=new List<byte>(Hex("48 B8"));b.AddRange(BitConverter.GetBytes(target.ToInt64()));b.AddRange(Hex("FF E0"));
             if(size<12)throw new ArgumentOutOfRangeException("size");while(b.Count<size)b.Add(0x90);return b.ToArray();
         }
+        internal static byte[] EntryJump(IntPtr source,IntPtr target,int size)
+        {
+            long delta=target.ToInt64()-source.ToInt64()-6;
+            // The ignored CS prefix keeps Windows from mistaking a bare JMP
+            // for an epilogue while the native stack frame is still allocated.
+            if(size>=6&&delta>=Int32.MinValue&&delta<=Int32.MaxValue&&UnwindSupport.RelativeEntrySafe())
+            {var bytes=new List<byte>{0x2e,0xe9};bytes.AddRange(BitConverter.GetBytes((int)delta));while(bytes.Count<size)bytes.Add(0x90);return bytes.ToArray();}
+            if(size<12)throw new Exception("Relative entry range or Windows unwind validation requires a 12-byte fallback window.");
+            return EntryJump(target,size);
+        }
+        internal static void Replay(Assembler a,IntPtr cave,IntPtr image,HookSite site)
+        {
+            var bytes=(byte[])site.Original.Clone();
+            var decoder=Iced.Intel.Decoder.Create(64,new Iced.Intel.ByteArrayCodeReader(bytes));decoder.IP=(ulong)Native.Add(image,site.Rva).ToInt64();
+            ulong original=decoder.IP;int emitted=a.Bytes.Count;
+            while(decoder.IP<original+(ulong)bytes.Length)
+            {
+                Iced.Intel.Instruction instruction;decoder.Decode(out instruction);
+                if(instruction.IsInvalid)throw new Exception("Invalid replay instruction.");
+                if(!instruction.IsIPRelativeMemoryOperand)continue;
+                var offsets=decoder.GetConstantOffsets(ref instruction);
+                long next=cave.ToInt64()+emitted+(long)(instruction.NextIP-original);
+                long delta=unchecked((long)instruction.IPRelativeMemoryAddress)-next;
+                if(offsets.DisplacementSize!=4||delta<Int32.MinValue||delta>Int32.MaxValue)throw new Exception("Replay target is outside the near hook's displacement range.");
+                Array.Copy(BitConverter.GetBytes((int)delta),0,bytes,(int)(instruction.IP-original)+offsets.DisplacementOffset,4);
+            }
+            a.Bytes.AddRange(bytes);
+        }
         internal static byte[] TailJump(IntPtr target,int register=11)
         {
             // A decoded liveness proof selects R10 or R11. This uses neither
@@ -130,7 +158,7 @@ namespace AzerothTrainer
             if(layout.Supports(TrainerFeature.Stats)||layout.Supports(TrainerFeature.Lives))RunStat.Emit(a,layout);
             a.Label("runDone");a.Emit("48 8B B4 24 10 01 00 00");FrameCode.Restore(a);a.SseRip(0x59,layout.RunTimeRegister,4096);FrameCode.Leave(a);
             // Replay the decoded register assignments and branch comparison.
-            a.Bytes.AddRange(layout.Site("RunHook").Original);
+            RarityCode.Replay(a,start,image,layout.Site("RunHook"));
             a.Bytes.AddRange(RarityCode.TailJump(continuation,layout.Site("RunHook").TailRegister));return a.Finish();
         }
         static void Request(Assembler a,int request,int field,string label)
@@ -167,7 +195,8 @@ namespace AzerothTrainer
             if(Enabled)return;
             if(builder!=null&&Cave==IntPtr.Zero)
             {
-                Cave=Native.VirtualAllocEx(handle,IntPtr.Zero,(UIntPtr)8192,0x3000,4);
+                Cave=AllocateNear();
+                if(Cave==IntPtr.Zero&&Original.Length>=12)Cave=Native.VirtualAllocEx(handle,IntPtr.Zero,(UIntPtr)8192,0x3000,4);
                 if(Cave==IntPtr.Zero)throw Native.Error("Cannot allocate trainer memory");
             }
             try
@@ -183,7 +212,7 @@ namespace AzerothTrainer
                     if(initialize!=null)initialize(this);
                     uint old;if(!Native.VirtualProtectEx(handle,Cave,(UIntPtr)4096,0x20,out old))throw Native.Error("Cannot prepare trainer instructions");
                     if(!Native.FlushInstructionCache(handle,Cave,(UIntPtr)4096))throw Native.Error("Cannot refresh trainer instructions");
-                    replacement=RarityCode.EntryJump(Cave,Original.Length);
+                    replacement=RarityCode.EntryJump(Site,Cave,Original.Length);
                 }
                 using(var frozen=new FrozenThreads(pid))
                 {
@@ -198,6 +227,26 @@ namespace AzerothTrainer
                 }
             }
             catch{if(!Enabled)Free();throw;}
+        }
+        IntPtr AllocateNear()
+        {
+            long origin=Site.ToInt64(),low=Math.Max(65536,origin-0x7fff0000L),high=Math.Min(0x00007ffffffeffffL,origin+0x7fff0000L);
+            var candidates=new List<long>();
+            for(long at=low;at<high;)
+            {
+                Native.MemoryRegion region;
+                if(Native.VirtualQueryEx(handle,new IntPtr(at),out region,(UIntPtr)System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.MemoryRegion)))==UIntPtr.Zero)break;
+                long end=checked(region.BaseAddress.ToInt64()+(long)region.RegionSize.ToUInt64());if(end<=at)break;
+                if(region.State==0x10000)
+                {
+                    long first=(Math.Max(at,region.BaseAddress.ToInt64())+65535)&~65535L,last=(Math.Min(end,high)-8192)&~65535L;
+                    if(first<=last)candidates.Add(Math.Max(first,Math.Min(last,origin&~65535L)));
+                }
+                at=end;
+            }
+            foreach(long address in candidates.OrderBy(p=>Math.Abs(p-origin)))
+            {IntPtr result=Native.VirtualAllocEx(handle,new IntPtr(address),(UIntPtr)8192,0x3000,4);if(result!=IntPtr.Zero)return result;}
+            return IntPtr.Zero;
         }
         internal void Replace(byte[] replacement)
         {
@@ -320,7 +369,7 @@ namespace AzerothTrainer
                     HookSite tick=layout.Site("RunHook");
                     run=AddGenerated(imageBase,tick,delegate(IntPtr c){return RunCode.Build(c,Native.Add(imageBase,tick.Continuation),imageBase,layout);});
                 }
-                if(Supports(TrainerFeature.XpScaling)){HookSite award=layout.Site("XpHook");xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout);});}
+                if(Supports(TrainerFeature.XpScaling)){HookSite award=layout.Site("XpHook");xp=AddGenerated(imageBase,award,delegate(IntPtr c){return XpCode.Build(Native.Add(imageBase,award.Continuation),layout,c,imageBase);});}
                 if(Supports(TrainerFeature.HealthFloor)){HookSite maximum=layout.Site("HealthHook");health=AddGenerated(imageBase,maximum,delegate(IntPtr c){return HealthCode.Build(Native.Add(imageBase,maximum.Continuation),layout);});}
                 if(Supports(TrainerFeature.ClassProgression)||Supports(TrainerFeature.ClassMarks))
                 {

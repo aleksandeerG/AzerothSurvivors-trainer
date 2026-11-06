@@ -2,12 +2,44 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Iced.Intel;
 namespace AzerothTrainer
 {
     internal static class UnwindSupport
     {
         static readonly object gate=new object();
+        static int relativeEntry;
+        internal static bool RelativeEntrySafe()
+        {
+            lock(gate)
+            {
+                if(relativeEntry!=0)return relativeEntry>0;
+                IntPtr memory=IntPtr.Zero,buffer=IntPtr.Zero,stack=IntPtr.Zero;
+                try
+                {
+                    // Model an interrupted hook entry inside a 40-byte native
+                    // frame. RtlVirtualUnwind reads these buffers; no code runs.
+                    memory=Marshal.AllocHGlobal(512);buffer=Marshal.AllocHGlobal(1248);stack=Marshal.AllocHGlobal(256);
+                    IntPtr context=new IntPtr((buffer.ToInt64()+15)&~15L);
+                    for(int p=0;p<512;p++)Marshal.WriteByte(memory,p,0x90);
+                    for(int p=0;p<1232;p++)Marshal.WriteByte(context,p,0);
+                    byte[] jump={0x2e,0xe9,0xf6,0,0,0};Marshal.Copy(jump,0,Native.Add(memory,4),jump.Length);
+                    var function=Native.Add(memory,64);Marshal.WriteInt32(function,0,0);Marshal.WriteInt32(function,4,64);Marshal.WriteInt32(function,8,128);
+                    byte[] unwind={1,4,1,0,4,0x42,0,0};Marshal.Copy(unwind,0,Native.Add(memory,128),unwind.Length);
+                    IntPtr sp=Native.Add(stack,64);Marshal.WriteInt64(sp,0,0xbad);Marshal.WriteInt64(sp,40,0x12345678);
+                    Marshal.WriteInt32(context,48,0x100001);Marshal.WriteInt64(context,152,sp.ToInt64());Marshal.WriteInt64(context,248,memory.ToInt64()+4);
+                    IntPtr data;ulong frame;Native.RtlVirtualUnwind(0,(ulong)memory.ToInt64(),(ulong)memory.ToInt64()+4,function,context,out data,out frame,IntPtr.Zero);
+                    relativeEntry=Marshal.ReadInt64(context,248)==0x12345678&&Marshal.ReadInt64(context,152)==sp.ToInt64()+48?1:-1;
+                }
+                catch{relativeEntry=-1;}
+                finally
+                {
+                    if(stack!=IntPtr.Zero)Marshal.FreeHGlobal(stack);if(buffer!=IntPtr.Zero)Marshal.FreeHGlobal(buffer);if(memory!=IntPtr.Zero)Marshal.FreeHGlobal(memory);
+                }
+                return relativeEntry>0;
+            }
+        }
         static byte[] ReadAt(FileStream file,long offset,int count)
         {
             byte[] bytes=new byte[count];file.Position=offset;int done=0;

@@ -12,11 +12,27 @@ namespace AzerothTrainer
         {
             // Roots 1..4 are entry RCX/RDX/R8/R9, 5 is the frame, 6 an
             // image literal, 7 an integer constant, and 11..14 an object field
-            // read through the corresponding entry argument. Offset is bytes.
+            // read through the corresponding entry argument. Root 20 is a sum;
+            // root 22 identifies a scalar value in a local expression walk.
+            // Offset is bytes except for scalar arguments and value identities.
             internal readonly int Root,Transform;internal readonly long Offset;internal readonly bool Floating;
+            internal readonly Value Left,Right;internal readonly bool Current=true;internal readonly int Depth;
             internal Value(int root,long offset=0,bool floating=false,int transform=0){Root=root;Offset=offset;Floating=floating;Transform=transform;}
+            internal Value Stale(){return new Value(this);}
+            Value(Value source){Root=source.Root;Offset=source.Offset;Transform=source.Transform;Floating=source.Floating;Left=source.Left;Right=source.Right;Depth=source.Depth;Current=false;}
+            internal Value(Value left,Value right,bool floating){Root=20;Left=left;Right=right;Floating=floating;Depth=Math.Max(left.Depth,right.Depth)+1;}
+            internal static Value Sum(Value left,Value right,bool floating){return left==null||right==null||Math.Max(left.Depth,right.Depth)>=16?null:new Value(left,right,floating);}
+            internal bool Snapshot {get{return Current&&(Root!=20||Left.Snapshot&&Right.Snapshot);}}
+            internal bool ReadsField {get{return Root>=11&&Root<=14||Root==20&&(Left.ReadsField||Right.ReadsField);}}
+            internal bool Aliases(Value address,int width)
+            {
+                if(!ReadsField)return false;if(address==null||address.Root<1||address.Root>4)return true;
+                return Root==20?Left.Aliases(address,width)||Right.Aliases(address,width):Root!=address.Root+10||Offset<address.Offset+width&&address.Offset<Offset+4;
+            }
+            internal bool Clock(long offset){return Snapshot&&Root==20&&Floating&&(FieldTime(Left,Right,offset)||FieldTime(Right,Left,offset));}
+            static bool FieldTime(Value field,Value time,long offset){return field.Current&&field.Root==11&&field.Floating&&field.Transform==0&&field.Offset==offset&&time.Root==8&&time.Offset==1;}
             internal Value Add(long offset){return new Value(Root,checked(Offset+offset),Floating,Transform);}
-            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating&&Transform==other.Transform;}
+            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating&&Transform==other.Transform&&(Root!=20||Left.Same(other.Left)&&Right.Same(other.Right));}
         }
         sealed class State
         {
@@ -27,7 +43,12 @@ namespace AzerothTrainer
                 bool changed=false;
                 for(int i=0;i<16;i++)if(Registers[i]!=null&&!Registers[i].Same(other.Registers[i])){Registers[i]=null;changed=true;}
                 for(int i=0;i<16;i++)if(Scalars[i]!=null&&!Scalars[i].Same(other.Scalars[i])){Scalars[i]=null;changed=true;}
-                foreach(long key in Stack.Keys.ToArray()){Value value;if(!other.Stack.TryGetValue(key,out value)||!Stack[key].Same(value)||Sizes[key]!=other.Sizes[key]){Stack.Remove(key);Sizes.Remove(key);changed=true;}}
+                for(int i=0;i<16;i++)
+                {
+                    if(Registers[i]!=null&&Registers[i].Snapshot&&!other.Registers[i].Snapshot){Registers[i]=Registers[i].Stale();changed=true;}
+                    if(Scalars[i]!=null&&Scalars[i].Snapshot&&!other.Scalars[i].Snapshot){Scalars[i]=Scalars[i].Stale();changed=true;}
+                }
+                foreach(long key in Stack.Keys.ToArray()){Value value;if(!other.Stack.TryGetValue(key,out value)||!Stack[key].Same(value)||Sizes[key]!=other.Sizes[key]){Stack.Remove(key);Sizes.Remove(key);changed=true;}else if(Stack[key].Snapshot&&!value.Snapshot){Stack[key]=Stack[key].Stale();changed=true;}}
                 return changed;
             }
         }
@@ -81,12 +102,16 @@ namespace AzerothTrainer
                     }
                     if(i.Mnemonic==Mnemonic.Inc){var source=Get(state,i.Op0Register);if(source!=null&&source.Transform==1)result=new Value(source.Root,source.Offset,false,2);}
                 }
+                if(destination>=0&&i.Mnemonic==Mnemonic.Add&&i.Op0Register.GetSize()==4&&(i.Op1Kind==OpKind.Register||i.Op1Kind==OpKind.Memory))
+                    result=Value.Sum(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,false):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,false);
                 Value scalarResult=null;
                 if(vector>=0&&(i.Mnemonic==Mnemonic.Movss||i.Mnemonic==Mnemonic.Movaps||i.Mnemonic==Mnemonic.Movups))
                 {
                     if(i.Op1Kind==OpKind.Register)scalarResult=Get(state,i.Op1Register);
                     else if(i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory)scalarResult=Load(state,i,true);
                 }
+                if(vector>=0&&i.Mnemonic==Mnemonic.Addss)
+                    scalarResult=Value.Sum(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,true);
                 if(i.Op0Kind==OpKind.Memory)
                 {
                     Value address=Address(state,i);
@@ -99,6 +124,14 @@ namespace AzerothTrainer
                             if((i.Mnemonic==Mnemonic.Mov||i.Mnemonic==Mnemonic.Movss)&&(width==8||width==4)&&i.Op1Kind==OpKind.Register){Value value=Get(state,i.Op1Register);if(value!=null){state.Stack[address.Offset]=value;state.Sizes[address.Offset]=width;}}
                         }
                     }
+                }
+                Value writtenAddress=i.Op0Kind==OpKind.Memory?Address(state,i):null;
+                bool call=i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.IndirectCall;
+                if(call||i.Op0Kind==OpKind.Memory&&(writtenAddress==null||writtenAddress.Root!=5)&&info.GetUsedMemory().Any(m=>DecodedCode.Write(m.Access)||m.Access==OpAccess.CondWrite||m.Access==OpAccess.ReadCondWrite))
+                {
+                    Value alias=call?null:writtenAddress;int width=i.MemorySize.GetSize();
+                    for(int r=0;r<16;r++){if(state.Registers[r]!=null&&state.Registers[r].Aliases(alias,width))state.Registers[r]=state.Registers[r].Stale();if(state.Scalars[r]!=null&&state.Scalars[r].Aliases(alias,width))state.Scalars[r]=state.Scalars[r].Stale();}
+                    foreach(long key in new List<long>(state.Stack.Keys))if(state.Stack[key].Aliases(alias,width))state.Stack[key]=state.Stack[key].Stale();
                 }
                 Value sp=Get(state,Register.RSP);
                 if(sp!=null&&i.Mnemonic==Mnemonic.Sub&&i.Op0Register==Register.RSP&&i.Op1Register==Register.RAX)
@@ -121,6 +154,38 @@ namespace AzerothTrainer
                 }
             }
         }
+        // A local expression walk gives each scalar write a distinct identity.
+        // Matching the total against the registers at the RNG call therefore
+        // cannot confuse a field reload with the value used by the earlier sum.
+        internal static int[] SumRegisters(Instruction[] instructions,int first,int end,int total)
+        {
+            var values=new Value[16];for(int r=0;r<16;r++)values[r]=new Value(22,r,true);
+            var factory=new InstructionInfoFactory();int identity=16;
+            for(int at=first;at<end;at++)
+            {
+                var i=instructions[at];if(i.FlowControl!=FlowControl.Next)return null;
+                var info=DecodedCode.Info(factory,ref i);int destination=Vector(i.Op0Register);
+                Value result=null;
+                if(destination>=0)
+                {
+                    int source=i.Op1Kind==OpKind.Register?Vector(i.Op1Register):-1;
+                    if(source>=0&&(i.Mnemonic==Mnemonic.Movaps||i.Mnemonic==Mnemonic.Movups||i.Mnemonic==Mnemonic.Movss))result=values[source];
+                    else if(i.Mnemonic==Mnemonic.Addss&&source>=0)result=Value.Sum(values[destination],values[source],true);
+                    else result=new Value(22,identity++,true);
+                }
+                foreach(var use in info.GetUsedRegisters())if(DecodedCode.Write(use.Access)||use.Access==OpAccess.CondWrite||use.Access==OpAccess.ReadCondWrite)
+                {int r=Vector(use.Register);if(r>=0)values[r]=new Value(22,identity++,true);}
+                if(destination>=0&&info.GetUsedRegisters().Any(r=>Vector(r.Register)==destination&&DecodedCode.Write(r.Access)))values[destination]=result;
+            }
+            var terms=new List<Value>();Terms(values[total],terms);if(terms.Count!=5)return null;var registers=new int[5];
+            for(int n=0;n<5;n++)
+            {
+                var matches=Enumerable.Range(6,10).Where(r=>Object.ReferenceEquals(terms[n],values[r])).ToArray();if(matches.Length!=1)return null;registers[n]=matches[0];
+            }
+            return registers.Distinct().Count()==5?registers:null;
+        }
+        static void Terms(Value value,List<Value> terms)
+        {if(value==null)return;if(value.Root==20&&value.Floating){Terms(value.Left,terms);Terms(value.Right,terms);}else terms.Add(value);}
         internal Value At(int index,Register register){return index>=0&&index<before.Length&&before[index]!=null?Get(before[index],register):null;}
         internal Value FrameAt(int index,long offset)
         {Value value;return index>=0&&index<before.Length&&before[index]!=null&&before[index].Stack.TryGetValue(offset,out value)?value:null;}

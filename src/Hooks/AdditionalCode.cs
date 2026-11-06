@@ -29,7 +29,7 @@ namespace AzerothTrainer
             if(Double.IsNaN(multiplier)||Double.IsInfinity(multiplier)||multiplier<0.1||multiplier>100)throw new ArgumentOutOfRangeException("XP multiplier");
             return (int)Math.Round(multiplier*1000,MidpointRounding.AwayFromZero);
         }
-        internal static byte[] Build(IntPtr target,GameLayout layout)
+        internal static byte[] Build(IntPtr target,GameLayout layout,IntPtr cave=default(IntPtr),IntPtr image=default(IntPtr))
         {
             var a=new Assembler(layout);FrameCode.Enter(a);FrameCode.Save(a);
             // Integer thousandths preserve every fraction across awards. Separate
@@ -47,7 +47,7 @@ namespace AzerothTrainer
             // Avoid wrapping the game's 32-bit current-XP addition at large awards.
             a.Emit("44 8B 91 $xp 41 F7 D2 4C 39 D0 49 0F 47 C2 89 C2"); // mov r10d,currentXP; not r10d; cmp rax,r10; cmova rax,r10; mov edx,eax
             a.Label("original");a.Emit("89 94 24 14 01 00 00");FrameCode.Restore(a);a.Emit("8B 94 24 14 01 00 00");FrameCode.Leave(a);
-            a.Bytes.AddRange(layout.Site("XpHook").Original);a.Bytes.AddRange(RarityCode.TailJump(target,layout.Site("XpHook").TailRegister));return a.Finish();
+            RarityCode.Replay(a,cave,image,layout.Site("XpHook"));a.Bytes.AddRange(RarityCode.TailJump(target,layout.Site("XpHook").TailRegister));return a.Finish();
         }
     }
     internal static class ProfileCode
