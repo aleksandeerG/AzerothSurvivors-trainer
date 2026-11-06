@@ -83,7 +83,7 @@ namespace AzerothTrainer
                 {
                     int end=text.Length-1,start=end;
                     while(start>0&&(text[start-1]=='_'||Char.IsLetterOrDigit(text[start-1])))start--;
-                    if(start<end&&text.Substring(0,start).All(c=>Char.IsWhiteSpace(c)||Char.IsPunctuation(c)))key=text.Substring(start,end-start);
+                    if(start<end&&text.Substring(0,start).All(c=>!Char.IsLetterOrDigit(c)&&c!='_'))key=text.Substring(start,end-start);
                 }
                 if(key.Length>0&&!seen.Add(key))
                 {for(int n=0;n<keys.Count;n++)if(keys[n]==key)keys[n]="";key="";}

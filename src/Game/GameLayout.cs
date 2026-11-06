@@ -20,6 +20,7 @@ namespace AzerothTrainer
         internal int RunTimeRegister {get{return discovery.RunTimeRegister;}}
         internal int RunningState {get{return discovery.RunningState;}}
         internal int OfferState {get{return discovery.OfferState;}}
+        internal int CoopValue {get{return discovery.CoopValue;}}
         internal int CoopRunningState {get{return discovery.CoopRunningState;}}
         internal int OfferStride {get{return discovery.OfferStride;}}
         internal int OfferRarity {get{return discovery.OfferRarity;}}

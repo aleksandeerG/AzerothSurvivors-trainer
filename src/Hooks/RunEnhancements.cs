@@ -83,9 +83,9 @@ namespace AzerothTrainer
         {
             a.Emit("C7 80 88 01 00 00 00 00 00 00"); // clear the previous hand's refusal
             a.Emit("80 BE $phase");a.Bytes.Add((byte)layout.OfferState);a.Branch("0F 85","autoReset");
-            a.Emit("80 BE $coop 00");
-            if(layout.Supports(TrainerFeature.CoopAutoPick)){a.Branch("0F 84","autoLive");a.Emit("80 BE $coopPhase");a.Bytes.Add((byte)layout.CoopRunningState);a.Branch("0F 85","autoReset");a.Label("autoLive");}
-            else a.Branch("0F 85","autoReset");
+            a.Emit("80 BE $coop");a.Bytes.Add((byte)(layout.CoopValue<0?0:layout.CoopValue));
+            if(layout.Supports(TrainerFeature.CoopAutoPick)){a.Branch(layout.CoopValue<0?"0F 84":"0F 85","autoLive");a.Emit("80 BE $coopPhase");a.Bytes.Add((byte)layout.CoopRunningState);a.Branch("0F 85","autoReset");a.Label("autoLive");}
+            else a.Branch(layout.CoopValue<0?"0F 85":"0F 84","autoReset");
             a.Emit("83 BE $hp 00");a.Branch("0F 8E","autoReset");
             a.Emit("0F B6 96 $offerKind 83 FA 02");a.Branch("0F 87","autoReset");
             a.Emit("44 8B 40 38 85 D2");a.Branch("0F 84","autoMode");a.Emit("44 8B 40 3C");

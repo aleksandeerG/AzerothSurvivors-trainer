@@ -12,8 +12,8 @@ namespace AzerothTrainer
         {
             // Roots 1..4 are entry RCX/RDX/R8/R9, 5 is the frame, 6 an
             // image literal, 7 an integer constant, and 11..14 an object field
-            // read through the corresponding entry argument. Root 20 is a sum;
-            // root 22 identifies a scalar value in a local expression walk.
+            // read through the corresponding entry argument. Roots 20 and 21
+            // are sums and products; root 22 identifies an opaque scalar.
             // Offset is bytes except for scalar arguments and value identities.
             internal readonly int Root,Transform;internal readonly long Offset;internal readonly bool Floating;
             internal readonly Value Left,Right;internal readonly bool Current=true;internal readonly int Depth;
@@ -22,17 +22,33 @@ namespace AzerothTrainer
             Value(Value source){Root=source.Root;Offset=source.Offset;Transform=source.Transform;Floating=source.Floating;Left=source.Left;Right=source.Right;Depth=source.Depth;Current=false;}
             internal Value(Value left,Value right,bool floating){Root=20;Left=left;Right=right;Floating=floating;Depth=Math.Max(left.Depth,right.Depth)+1;}
             internal static Value Sum(Value left,Value right,bool floating){return left==null||right==null||Math.Max(left.Depth,right.Depth)>=16?null:new Value(left,right,floating);}
-            internal bool Snapshot {get{return Current&&(Root!=20||Left.Snapshot&&Right.Snapshot);}}
-            internal bool ReadsField {get{return Root>=11&&Root<=14||Root==20&&(Left.ReadsField||Right.ReadsField);}}
+            internal static Value Product(Value left,Value right,int identity)
+            {
+                // An unknown scale retains argument dependence, not its value.
+                left=left??new Value(22,identity,true);right=right??new Value(22,identity,true);
+                var result=Sum(left,right,true);return result==null?null:new Value(21,result);
+            }
+            Value(int root,Value expression){Root=root;Left=expression.Left;Right=expression.Right;Floating=true;Depth=expression.Depth;}
+            internal bool Expression {get{return Root==20||Root==21;}}
+            internal bool Snapshot {get{return Current&&(!Expression||Left.Snapshot&&Right.Snapshot);}}
+            internal bool ReadsField {get{return Root>=11&&Root<=14||Expression&&(Left.ReadsField||Right.ReadsField);}}
             internal bool Aliases(Value address,int width)
             {
                 if(!ReadsField)return false;if(address==null||address.Root<1||address.Root>4)return true;
-                return Root==20?Left.Aliases(address,width)||Right.Aliases(address,width):Root!=address.Root+10||Offset<address.Offset+width&&address.Offset<Offset+4;
+                return Expression?Left.Aliases(address,width)||Right.Aliases(address,width):Root!=address.Root+10||Offset<address.Offset+width&&address.Offset<Offset+4;
             }
-            internal bool Clock(long offset){return Snapshot&&Root==20&&Floating&&(FieldTime(Left,Right,offset)||FieldTime(Right,Left,offset));}
-            static bool FieldTime(Value field,Value time,long offset){return field.Current&&field.Root==11&&field.Floating&&field.Transform==0&&field.Offset==offset&&time.Root==8&&time.Offset==1;}
+            internal bool Clock(long offset){return ClockArgument(offset)>=0;}
+            internal int ClockArgument(long offset)
+            {
+                if(!Snapshot||Root!=20||!Floating)return -1;
+                if(Field(Left,offset))return UniqueArgument(Right);if(Field(Right,offset))return UniqueArgument(Left);return -1;
+            }
+            static bool Field(Value value,long offset){return value.Current&&value.Root==11&&value.Floating&&value.Transform==0&&value.Offset==offset;}
+            static int UniqueArgument(Value value){var args=new HashSet<int>();value.Arguments(args);return args.Count==1?args.First():-1;}
+            internal void Arguments(HashSet<int> args)
+            {if(Root==8&&Offset>=0&&Offset<4)args.Add((int)Offset);else if(Expression){Left.Arguments(args);Right.Arguments(args);}}
             internal Value Add(long offset){return new Value(Root,checked(Offset+offset),Floating,Transform);}
-            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating&&Transform==other.Transform&&(Root!=20||Left.Same(other.Left)&&Right.Same(other.Right));}
+            internal bool Same(Value other){return other!=null&&Root==other.Root&&Offset==other.Offset&&Floating==other.Floating&&Transform==other.Transform&&(!Expression||Left.Same(other.Left)&&Right.Same(other.Right));}
         }
         sealed class State
         {
@@ -116,6 +132,7 @@ namespace AzerothTrainer
                 }
                 if(vector>=0&&i.Mnemonic==Mnemonic.Addss)
                     scalarResult=Value.Sum(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,true);
+                if(vector>=0&&i.Mnemonic==Mnemonic.Mulss)scalarResult=Value.Product(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):Get(state,i.Op1Register),at);
                 if(i.Op0Kind==OpKind.Memory)
                 {
                     Value address=Address(state,i);
