@@ -622,8 +622,14 @@ namespace AzerothTrainer
             preferred=roots.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
             if(roots.Length!=1){Failures["Run"]="Phase-qualified run hosts: "+roots.Length+"; clock evidence "+(clock<0?"unresolved":"+0x"+clock.ToString("x"))+". "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
             var run=roots[0];var list=run.Instructions;
+            if(clock<0&&!FieldErrors.ContainsKey("clock"))
+            {
+                var labels=new[]{UiKnown("clock"),TextKnown("clock")}.Where(offset=>offset>=0).Distinct().ToArray();
+                if(labels.Length==1)clock=labels[0];
+            }
             // Offset agreement in an unrelated nominated handler cannot prove
             // this host's clock. Require an update along its own call paths.
+            if(clock<0&&!FieldErrors.ContainsKey("clock"))FieldErrors["clock"]="No unique clock update is proven for the selected run host.";
             if(clock>=0&&!ClockUpdates(run,clock,1))
             {FieldErrors["clock"]="The selected run host has no read/modify/write update for the labelled clock.";clock=-1;}
             Functions["Run"]=run;
@@ -723,6 +729,24 @@ namespace AzerothTrainer
         {
             var target=(int)code.Instructions[p].NearBranchTarget;var f=Image.FunctionAt(target);if(f==null||f.Start!=target)return null;try{return Decode(f);}catch{return null;}
         }
+        readonly Dictionary<int,int[]> clockPaths=new Dictionary<int,int[]>();
+        DecodedCode[] ClockPath(DecodedCode code)
+        {
+            if(code==null)return new DecodedCode[0];int[] addresses;int start=code.Function.Start;
+            if(clockPaths.TryGetValue(start,out addresses))return addresses.Select(at=>at==start?code:Decode(Image.FunctionAt(at))).ToArray();
+            var chain=new List<DecodedCode>();var seen=new HashSet<int>();string failure=null;
+            while(code!=null)
+            {
+                if(!seen.Add(code.Function.Start)){failure="Cyclic tail-jump thunk chain.";break;}
+                chain.Add(code);var ins=code.Instructions;int at=0;while(at<ins.Length&&(ins[at].Mnemonic==Mnemonic.Nop||ins[at].Mnemonic==Mnemonic.Endbr64))at++;
+                if(at==ins.Length||ins[at].FlowControl!=FlowControl.UnconditionalBranch||ins[at].Op0Kind!=OpKind.NearBranch64||ins[at].NearBranchTarget>=(ulong)code.Function.Start&&ins[at].NearBranchTarget<(ulong)(code.Function.Start+code.Function.Length))break;
+                if(chain.Count==32){failure="Tail-jump thunk chain exceeds the analysis limit.";break;}
+                code=ForwardTarget(code,at);if(code==null){failure="Tail-jump thunk target is not a decoded function entry.";break;}
+            }
+            var path=failure==null?chain.ToArray():new DecodedCode[0];clockPaths[start]=path.Select(part=>part.Function.Start).ToArray();
+            if(failure!=null)Failures["Clock thunk 0x"+start.ToString("x")]=failure;return path;
+        }
+        DecodedCode ClockBody(DecodedCode code){var path=ClockPath(code);return path.Length==0?null:path[path.Length-1];}
         readonly Dictionary<Tuple<int,int>,int[]> clockStores=new Dictionary<Tuple<int,int>,int[]>();
         readonly Dictionary<Tuple<int,int,int>,int[]> clockCoverage=new Dictionary<Tuple<int,int,int>,int[]>();
         int[] DirectClocks(DecodedCode code,int clock)
@@ -732,48 +756,56 @@ namespace AzerothTrainer
         }
         int[] ClockCoverage(DecodedCode code,int clock,int depth)
         {
-            if(code==null)return new int[0];var key=Tuple.Create(code.Function.Start,clock,depth);int[] cached;if(clockCoverage.TryGetValue(key,out cached))return cached;var points=DirectClocks(code,clock).ToList();
+            if(code==null)return new int[0];var body=ClockBody(code);if(body==null)return new int[0];
+            if(body.Function.Start!=code.Function.Start)return ClockCoverage(body,clock,depth).Length>0?new[]{0}:new int[0];
+            var key=Tuple.Create(code.Function.Start,clock,depth);int[] cached;if(clockCoverage.TryGetValue(key,out cached))return cached;var points=DirectClocks(code,clock).ToList();
             if(depth>0)foreach(int call in ForwardCalls(code))if(ClockCoverage(ForwardTarget(code,call),clock,depth-1).Length>0)points.Add(call);cached=points.ToArray();clockCoverage[key]=cached;return cached;
         }
         bool ClockUpdates(DecodedCode code,int clock,int depth)
         {
+            code=ClockBody(code);
             if(code==null)return false;
             if(DirectClocks(code,clock).Any(p=>{var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);return value!=null&&value.UpdatesClock(DecodedCode.Disp(i));}))return true;
             return depth>0&&ForwardCalls(code).Any(p=>ClockUpdates(ForwardTarget(code,p),clock,depth-1));
         }
         void DependOnClocks(DecodedCode root,DecodedCode code,int clock,int depth)
         {
+            var path=ClockPath(code);if(path.Length==0)return;
+            foreach(var part in path)
+            {
+                int size;if(part.Function.Start!=root.Function.Start){root.Dependencies.TryGetValue(part.Function.Start,out size);root.Dependencies[part.Function.Start]=Math.Max(size,part.Function.Length);}
+                foreach(var span in part.Dependencies.ToArray())if(span.Key!=root.Function.Start){root.Dependencies.TryGetValue(span.Key,out size);root.Dependencies[span.Key]=Math.Max(size,span.Value);}
+            }
+            code=path[path.Length-1];
             if(depth==0)return;
             foreach(int p in ForwardCalls(code))
             {
                 var target=ForwardTarget(code,p);if(ClockCoverage(target,clock,depth-1).Length==0)continue;
-                int size;if(target!=root){root.Dependencies.TryGetValue(target.Function.Start,out size);root.Dependencies[target.Function.Start]=Math.Max(size,target.Function.Length);}
-                foreach(var span in target.Dependencies.ToArray())if(span.Key!=root.Function.Start){root.Dependencies.TryGetValue(span.Key,out size);root.Dependencies[span.Key]=Math.Max(size,span.Value);}
                 DependOnClocks(root,target,clock,depth-1);
             }
         }
         HashSet<int> StrongClocks(DecodedCode code,int depth)
         {
-            var offsets=new HashSet<int>();if(code==null)return offsets;
+            var offsets=new HashSet<int>();code=ClockBody(code);if(code==null)return offsets;
             foreach(int p in DirectClocks(code,-1))offsets.Add(DecodedCode.Disp(code.Instructions[p]));
             if(depth>0)foreach(int call in ForwardCalls(code))offsets.UnionWith(StrongClocks(ForwardTarget(code,call),depth-1));return offsets;
         }
         HashSet<int> ClockArguments(DecodedCode code,int clock,int depth)
         {
-            var arguments=new HashSet<int>();if(code==null)return arguments;
+            var arguments=new HashSet<int>();code=ClockBody(code);if(code==null)return arguments;
             foreach(int p in DirectClocks(code,clock))
             {var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);if(value!=null){int arg=value.ClockArgument(DecodedCode.Disp(i));if(arg>=0)arguments.Add(arg);}}
             if(depth>0)foreach(int call in ForwardCalls(code))
             {
                 var target=ForwardTarget(code,call);if(ClockCoverage(target,clock,0).Length==0)continue;var slots=ClockArguments(target,clock,depth-1);
-                if(slots.Count==0)slots=FloatArguments(target);
+                if(slots.Count==0)slots=FloatArguments(ClockBody(target));
                 foreach(int slot in slots){var value=code.Flow.At(call,(Register)((int)Register.XMM0+slot));if(value!=null&&value.Root==8)arguments.Add((int)value.Offset);}
             }
             return arguments;
         }
         HashSet<int> ClockDirections(DecodedCode code,int clock,int depth)
         {
-            var directions=new HashSet<int>();if(code==null)return directions;
+            var directions=new HashSet<int>();code=ClockBody(code);if(code==null)return directions;
             foreach(int p in DirectClocks(code,clock)){var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);if(value!=null&&value.UpdatesClock(DecodedCode.Disp(i)))directions.Add(value.Root==25?-1:1);}
             if(depth>0)foreach(int call in ForwardCalls(code))directions.UnionWith(ClockDirections(ForwardTarget(code,call),clock,depth-1));return directions;
         }
