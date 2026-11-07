@@ -40,7 +40,7 @@ namespace AzerothTrainer
             a.Emit("49 83 3B 00");a.Branch("0F 84","reset");a.Emit("49 83 C3 20 FF C8");a.Branch("0F 85","find"); // empty slot, or add r11,32; dec eax
             a.Rip("4C 8D 1D",4096+CarryOffset);a.Branch("E9","reset");
             a.Label("found");a.Rip("44 8B 05",4096);a.Emit("45 3B 43 10");a.Branch("0F 85","reset"); // mov r8d,multiplier; cmp r8d,[r11+10]
-            if(layout.HasField("clock")){a.Emit("F3 0F 10 81 $clock 41 0F 2E 43 14");a.Branch("0F 82","reset");}a.Branch("E9","scale"); // compare a clock only when independently verified
+            if(layout.HasField("clock")){a.Emit("F3 0F 10 81 $clock 41 0F 2E 43 14");a.Branch(layout.RunClockDirection<0?"0F 87":"0F 82","reset");}a.Branch("E9","scale"); // compare a clock only when independently verified
             a.Label("reset");a.Rip("44 8B 05",4096);a.Emit("49 89 0B 49 C7 43 08 00 00 00 00 45 89 43 10");
             a.Label("scale");if(layout.HasField("clock"))a.Emit("F3 0F 10 81 $clock F3 41 0F 11 43 14");
             a.Emit("89 D0 49 0F AF C0 49 03 43 08 31 D2 41 B8 E8 03 00 00 49 F7 F0 49 89 53 08"); // mov eax,edx; imul rax,r8; add rax,carry; xor edx,edx; div r8(1000); store remainder

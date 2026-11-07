@@ -43,9 +43,10 @@ namespace AzerothTrainer
             internal bool Clock(long offset){return ClockArgument(offset)>=0;}
             internal int ClockArgument(long offset)
             {
-                if(!Snapshot||Root!=20&&Root!=25||!Floating)return -1;
+                if(!UpdatesClock(offset))return -1;
                 if(Field(Left,offset))return UniqueArgument(Right);if(Root==20&&Field(Right,offset))return UniqueArgument(Left);return -1;
             }
+            internal bool UpdatesClock(long offset){return Snapshot&&Floating&&(Root==20||Root==25)&&(Field(Left,offset)||Root==20&&Field(Right,offset));}
             static bool Field(Value value,long offset){return value.Current&&value.Root==11&&value.Floating&&value.Transform==0&&value.Offset==offset;}
             static int UniqueArgument(Value value){var args=new HashSet<int>();value.Arguments(args);return args.Count==1?args.First():-1;}
             internal void Arguments(HashSet<int> args)
@@ -134,7 +135,7 @@ namespace AzerothTrainer
                     else if(i.Mnemonic==Mnemonic.Movss&&i.Op1Kind==OpKind.Memory)scalarResult=Load(state,i,true);
                 }
                 if(vector>=0&&i.Mnemonic==Mnemonic.Addss)
-                    scalarResult=Value.Sum(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,true);
+                    scalarResult=Value.Scalar(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):i.Op1Kind==OpKind.Register?Get(state,i.Op1Register):null,at,20);
                 if(vector>=0&&i.Mnemonic==Mnemonic.Mulss)scalarResult=Value.Product(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):Get(state,i.Op1Register),at);
                 if(vector>=0&&(i.Mnemonic==Mnemonic.Minss||i.Mnemonic==Mnemonic.Minps||i.Mnemonic==Mnemonic.Maxss||i.Mnemonic==Mnemonic.Maxps||i.Mnemonic==Mnemonic.Subss))
                     scalarResult=Value.Scalar(Get(state,i.Op0Register),i.Op1Kind==OpKind.Memory?Load(state,i,true):Get(state,i.Op1Register),at,i.Mnemonic==Mnemonic.Subss?25:i.Mnemonic==Mnemonic.Minss||i.Mnemonic==Mnemonic.Minps?23:24);

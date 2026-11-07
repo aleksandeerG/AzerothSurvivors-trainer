@@ -605,21 +605,32 @@ namespace AzerothTrainer
             roots=roots.Where(c=>ClockCoverage(c,clock,1).Length>0).ToArray();
             // Classify dispatch targets even when their host uses an unsupported
             // Game argument. Coop cannot become Run when that host is refused.
-            var children=new HashSet<int>();var dispatchers=new HashSet<int>();
+            var children=new HashSet<int>();var dispatchers=new HashSet<int>();var stateDispatchers=new HashSet<int>();var phaseHosts=new HashSet<int>(candidates.Select(c=>c.Function.Start));
             foreach(var code in nominations)for(int argument=0;argument<4;argument++)for(int p=0;p<code.Instructions.Length;p++)
                 foreach(int call in CoopDispatches(code,p,clock,argument))
-                {children.Add((int)code.Instructions[call].NearBranchTarget);if(argument==0)dispatchers.Add(code.Function.Start);}
+                {
+                    var target=ForwardTarget(code,call);bool state=CoopStates(target).Length>0;
+                    if(argument==0){dispatchers.Add(code.Function.Start);if(state)stateDispatchers.Add(code.Function.Start);}
+                    // A phase-checking update is not a co-op child merely
+                    // because another timed wrapper calls it conditionally.
+                    if(!phaseHosts.Contains(target.Function.Start)||state)children.Add(target.Function.Start);
+                }
             roots=roots.Where(c=>!children.Contains(c.Function.Start)).ToArray();
             if(peers.Count==0)roots=roots.Where(c=>dispatchers.Contains(c.Function.Start)).ToArray();
-            var preferred=roots.Where(c=>dispatchers.Contains(c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
+            var preferred=roots.Where(c=>stateDispatchers.Contains(c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
+            preferred=roots.Where(c=>dispatchers.Contains(c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
             preferred=roots.Where(c=>anchored.Any(a=>a.Function.Start==c.Function.Start)).ToArray();if(preferred.Length>0)roots=preferred;
             if(roots.Length!=1){Failures["Run"]="Phase-qualified run hosts: "+roots.Length+"; clock evidence "+(clock<0?"unresolved":"+0x"+clock.ToString("x"))+". "+String.Join("; ",Failures.Where(f=>f.Key.StartsWith("Run candidate")).Select(f=>f.Key+": "+f.Value).ToArray());return;}
-            var run=roots[0];var list=run.Instructions;Functions["Run"]=run;
-            var directions=ClockDirections(run,clock,1);if(directions.Count==1)RunClockDirection=directions.First();else if(directions.Count>1)FieldErrors["clock"]="Run clock updates disagree on their direction.";
+            var run=roots[0];var list=run.Instructions;
+            // Offset agreement in an unrelated nominated handler cannot prove
+            // this host's clock. Require an update along its own call paths.
+            if(clock>=0&&!ClockUpdates(run,clock,1))
+            {FieldErrors["clock"]="The selected run host has no read/modify/write update for the labelled clock.";clock=-1;}
+            Functions["Run"]=run;
+            if(clock>=0){var directions=ClockDirections(run,clock,1);if(directions.Count==1)RunClockDirection=directions.First();else if(directions.Count>1)FieldErrors["clock"]="Run clock updates disagree on their direction.";}
             if(clock>=0){Field("clock",clock,"Run");DependOnUi(run,"clock");DependOnText(run,"clock");}
             foreach(var phase in PhaseChecks(run).Where(p=>peers.ContainsKey(DecodedCode.Disp(list[p.Item1]))))foreach(var witness in peers[DecodedCode.Disp(list[phase.Item1])])run.Dependencies[witness.Function.Start]=witness.Function.Length;
-            foreach(int call in ClockCoverage(run,clock,1).Where(p=>IsForward(run,p)))
-            {var target=ForwardTarget(run,call);if(target!=null)run.Dependencies[target.Function.Start]=target.Function.Length;}
+            DependOnClocks(run,run,clock,2);
             var timeArguments=ClockArguments(run,clock,1);int timeArgument=timeArguments.Count==1?timeArguments.First():-1;
             var healingTargets=new HashSet<int>();var clockTargets=ClockCoverage(run,clock,1).ToList();var stateGuards=new List<int>();
             for(int p=0;p<list.Length;p++)
@@ -689,15 +700,15 @@ namespace AzerothTrainer
             {
                 var i=ins[p];if(i.MemoryIndex!=Register.None||i.MemorySize.GetSize()!=1||DecodedCode.Disp(i)<0x100||!code.Flow.Argument(p,i.MemoryBase,0))continue;
                 if(i.Mnemonic==Mnemonic.Cmp&&i.Op0Kind==OpKind.Memory&&ByteImmediate(i))yield return Tuple.Create(p,p);
-                else if(i.Mnemonic==Mnemonic.Movzx&&p+1<ins.Length&&ins[p+1].Mnemonic==Mnemonic.Cmp&&DecodedCode.Full(ins[p+1].Op0Register)==DecodedCode.Full(i.Op0Register)&&ByteImmediate(ins[p+1]))yield return Tuple.Create(p,p+1);
+                else if(i.Mnemonic==Mnemonic.Movzx&&p+1<ins.Length&&ins[p+1].Mnemonic==Mnemonic.Cmp&&ByteResult(i.Op0Register,ins[p+1].Op0Register)&&ByteImmediate(ins[p+1]))yield return Tuple.Create(p,p+1);
                 else if(i.Mnemonic==Mnemonic.Movzx&&p+1<ins.Length&&SelfTest(ins[p+1],i.Op0Register))yield return Tuple.Create(p,p+1);
             }
         }
         static bool SelfTest(Instruction i,Register register)
         {
-            return i.Mnemonic==Mnemonic.Test&&i.Op0Kind==OpKind.Register&&i.Op1Kind==OpKind.Register&&i.Op0Register==i.Op1Register&&DecodedCode.Full(i.Op0Register)==DecodedCode.Full(register)&&
-                i.Op0Register!=Register.AH&&i.Op0Register!=Register.BH&&i.Op0Register!=Register.CH&&i.Op0Register!=Register.DH&&(register.GetSize()==4||i.Op0Register.GetSize()<=register.GetSize());
+            return i.Mnemonic==Mnemonic.Test&&i.Op0Kind==OpKind.Register&&i.Op1Kind==OpKind.Register&&i.Op0Register==i.Op1Register&&ByteResult(register,i.Op0Register);
         }
+        static bool ByteResult(Register written,Register read){return DecodedCode.Full(written)==DecodedCode.Full(read)&&read!=Register.AH&&read!=Register.BH&&read!=Register.CH&&read!=Register.DH&&(written.GetSize()==4||read.GetSize()<=written.GetSize());}
         static bool IsForward(DecodedCode code,int p,int argument=0)
         {
             if(code==null)return false;var i=code.Instructions[p];return (i.FlowControl==FlowControl.Call||i.FlowControl==FlowControl.UnconditionalBranch)&&i.Op0Kind==OpKind.NearBranch64&&(i.NearBranchTarget<(ulong)code.Function.Start||i.NearBranchTarget>=(ulong)(code.Function.Start+code.Function.Length))&&code.Flow.Argument(p,Register.RCX,argument);
@@ -724,6 +735,23 @@ namespace AzerothTrainer
             if(code==null)return new int[0];var key=Tuple.Create(code.Function.Start,clock,depth);int[] cached;if(clockCoverage.TryGetValue(key,out cached))return cached;var points=DirectClocks(code,clock).ToList();
             if(depth>0)foreach(int call in ForwardCalls(code))if(ClockCoverage(ForwardTarget(code,call),clock,depth-1).Length>0)points.Add(call);cached=points.ToArray();clockCoverage[key]=cached;return cached;
         }
+        bool ClockUpdates(DecodedCode code,int clock,int depth)
+        {
+            if(code==null)return false;
+            if(DirectClocks(code,clock).Any(p=>{var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);return value!=null&&value.UpdatesClock(DecodedCode.Disp(i));}))return true;
+            return depth>0&&ForwardCalls(code).Any(p=>ClockUpdates(ForwardTarget(code,p),clock,depth-1));
+        }
+        void DependOnClocks(DecodedCode root,DecodedCode code,int clock,int depth)
+        {
+            if(depth==0)return;
+            foreach(int p in ForwardCalls(code))
+            {
+                var target=ForwardTarget(code,p);if(ClockCoverage(target,clock,depth-1).Length==0)continue;
+                int size;if(target!=root){root.Dependencies.TryGetValue(target.Function.Start,out size);root.Dependencies[target.Function.Start]=Math.Max(size,target.Function.Length);}
+                foreach(var span in target.Dependencies.ToArray())if(span.Key!=root.Function.Start){root.Dependencies.TryGetValue(span.Key,out size);root.Dependencies[span.Key]=Math.Max(size,span.Value);}
+                DependOnClocks(root,target,clock,depth-1);
+            }
+        }
         HashSet<int> StrongClocks(DecodedCode code,int depth)
         {
             var offsets=new HashSet<int>();if(code==null)return offsets;
@@ -746,7 +774,7 @@ namespace AzerothTrainer
         HashSet<int> ClockDirections(DecodedCode code,int clock,int depth)
         {
             var directions=new HashSet<int>();if(code==null)return directions;
-            foreach(int p in DirectClocks(code,clock)){var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);if(value!=null&&value.Clock(DecodedCode.Disp(i)))directions.Add(value.Root==25?-1:1);}
+            foreach(int p in DirectClocks(code,clock)){var i=code.Instructions[p];var value=code.Flow.At(p,i.Op1Register);if(value!=null&&value.UpdatesClock(DecodedCode.Disp(i)))directions.Add(value.Root==25?-1:1);}
             if(depth>0)foreach(int call in ForwardCalls(code))directions.UnionWith(ClockDirections(ForwardTarget(code,call),clock,depth-1));return directions;
         }
         static HashSet<int> FloatArguments(DecodedCode code)
@@ -760,18 +788,32 @@ namespace AzerothTrainer
             return arguments;
         }
         bool IsCoopDispatch(DecodedCode code,int at,int expected=-1)
-        {return CoopDispatches(code,at,Known("clock"),0).Any(p=>expected<0||code.Instructions[p].NearBranchTarget==(ulong)expected);}
+        {return CoopDispatches(code,at,KnownFrom("clock",true),0).Any(p=>expected<0||code.Instructions[p].NearBranchTarget==(ulong)expected);}
         IEnumerable<int> CoopDispatches(DecodedCode code,int at,int clock,int argument)
         {
             var ins=code.Instructions;var i=ins[at];
-            bool compare=i.Mnemonic==Mnemonic.Cmp&&(DecodedCode.Immediate(i,1,0)||DecodedCode.Immediate(i,1,1)),test=i.Mnemonic==Mnemonic.Test&&DecodedCode.Immediate(i,1,255);
-            if(at+1>=ins.Length||!compare&&!test||i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||runPhaseOffsets.Contains(DecodedCode.Disp(i))||i.IP>=(ulong)(code.Function.Start+512)||!code.Flow.Argument(at,i.MemoryBase,argument))yield break;
-            int branch=at+1;while(branch<Math.Min(ins.Length,at+6)&&ins[branch].FlowControl==FlowControl.Next&&ins[branch].RflagsModified==0)branch++;
+            bool compare=i.Mnemonic==Mnemonic.Cmp&&(DecodedCode.Immediate(i,1,0)||DecodedCode.Immediate(i,1,1)),test=i.Mnemonic==Mnemonic.Test&&DecodedCode.Immediate(i,1,255),load=i.Mnemonic==Mnemonic.Movzx&&i.Op1Kind==OpKind.Memory&&at+1<ins.Length&&SelfTest(ins[at+1],i.Op0Register);
+            if(at+1>=ins.Length||!compare&&!test&&!load||!load&&i.Op0Kind!=OpKind.Memory||i.MemorySize.GetSize()!=1||i.MemoryIndex!=Register.None||runPhaseOffsets.Contains(DecodedCode.Disp(i))||!code.Flow.Argument(at,i.MemoryBase,argument))yield break;
+            int branch=at+(load?2:1);while(branch<Math.Min(ins.Length,at+7)&&ins[branch].FlowControl==FlowControl.Next&&ins[branch].RflagsModified==0)branch++;
             if(branch>=ins.Length||ins[branch].Mnemonic!=Mnemonic.Je&&ins[branch].Mnemonic!=Mnemonic.Jne)yield break;
             int target=code.Index(ins[branch].NearBranchTarget),equal=ins[branch].Mnemonic==Mnemonic.Je?target:branch+1,unequal=ins[branch].Mnemonic==Mnemonic.Jne?target:branch+1;
             bool exact=compare&&DecodedCode.Immediate(i,1,1);int nonzero=exact?equal:unequal,zero=exact?unequal:equal;
-            foreach(int call in Enumerable.Range(0,ins.Length).Where(p=>IsForward(code,p,argument)&&ClockCoverage(ForwardTarget(code,p),clock,0).Length>0))
-                if(code.ReachesBefore(nonzero,at,new[]{call})==true&&code.ReachesBefore(zero,at,new[]{call})==false)yield return call;
+            foreach(int call in Enumerable.Range(0,ins.Length).Where(p=>IsForward(code,p,argument)&&ClockCoverage(ForwardTarget(code,p),clock,1).Length>0))
+                if(code.ReachesBefore(nonzero,at,new[]{call})==true&&code.ReachesBefore(zero,at,new[]{call})==false&&
+                    code.ReachesBefore(zero,at,DispatchClockCoverage(code,clock,argument).Where(p=>p!=call).ToList())==true)yield return call;
+        }
+        int[] DispatchClockCoverage(DecodedCode code,int clock,int argument)
+        {
+            if(argument==0)return ClockCoverage(code,clock,1);
+            // Unsupported host argument positions still establish dispatch
+            // targets, but never make that host eligible for a Run hook.
+            var points=new List<int>();var ins=code.Instructions;
+            for(int p=0;p<ins.Length;p++)
+            {
+                var i=ins[p];if(i.Mnemonic==Mnemonic.Movss&&i.Op0Kind==OpKind.Memory&&i.MemoryIndex==Register.None&&(clock<0||DecodedCode.Disp(i)==clock)&&code.Flow.Argument(p,i.MemoryBase,argument))points.Add(p);
+                if(IsForward(code,p,argument)&&ClockCoverage(ForwardTarget(code,p),clock,0).Length>0)points.Add(p);
+            }
+            return points.ToArray();
         }
         static bool RunClockStore(DecodedCode code,int at,int clock)
         {
@@ -841,32 +883,48 @@ namespace AzerothTrainer
         void DiscoverCoop()
         {
             DecodedCode run;if(!Functions.TryGetValue("Run",out run))return;
+            var dispatches=Enumerable.Range(0,run.Instructions.Length).Where(p=>IsCoopDispatch(run,p)).ToArray();
+            Action<int[]> publish=points=>
+            {
+                var offsets=points.Select(p=>DecodedCode.Disp(run.Instructions[p])).Distinct().ToArray();var predicates=points.Select(p=>run.Instructions[p].Mnemonic==Mnemonic.Cmp&&DecodedCode.Immediate(run.Instructions[p],1,1)?1:-1).Distinct().ToArray();
+                Need(offsets.Length==1&&predicates.Length==1,"Co-op dispatch predicates are absent or disagree.");Field("coop",offsets[0],"Run");CoopValue=predicates[0];
+            };
+            int clock=KnownFrom("clock",true);
             var targets=run.Instructions.Where(i=>(i.FlowControl==FlowControl.UnconditionalBranch||i.FlowControl==FlowControl.Call)&&i.Op0Kind==OpKind.NearBranch64&&
                 (i.NearBranchTarget<(ulong)run.Function.Start||i.NearBranchTarget>=(ulong)(run.Function.Start+run.Function.Length))).Select(i=>Image.FunctionAt(checked((int)i.NearBranchTarget))).Where(f=>f!=null).ToArray();
             var candidates=new List<Tuple<DecodedCode,int,int>>();
             foreach(var f in targets.GroupBy(t=>t.Start).Select(g=>g.First()))
             {
                 if(!Enumerable.Range(0,run.Instructions.Length).Any(p=>IsCoopDispatch(run,p,f.Start)))continue;
-                DecodedCode code;try{code=Decode(f);}catch{continue;}var ins=code.Instructions;
-                var clocks=Enumerable.Range(0,ins.Length).Where(p=>RunClockStore(code,p,Known("clock"))).ToArray();if(clocks.Length==0)continue;
-                for(int at=0;at+1<ins.Length&&ins[at].IP<(ulong)(f.Start+256);at++)
-                {
-                    var state=ins[at];if(state.Mnemonic!=Mnemonic.Movzx||state.Op0Register!=Register.EAX||state.MemorySize.GetSize()!=1||!code.Flow.Argument(at,state.MemoryBase,0)||!RR(ins[at+1],Mnemonic.Test,Register.AL,Register.AL))continue;
-                    int offset=DecodedCode.Disp(state);var values=new HashSet<int>();
-                    for(int p=0;p+1<ins.Length;p++)
-                        if(ins[p].Mnemonic==Mnemonic.Movzx&&ins[p].MemorySize.GetSize()==1&&code.Flow.Argument(p,ins[p].MemoryBase,0)&&DecodedCode.Disp(ins[p])==offset&&ins[p+1].Mnemonic==Mnemonic.Cmp&&ins[p+1].Op0Register==Register.AL&&ByteImmediate(ins[p+1]))values.Add((int)ins[p+1].GetImmediate(1));
-                    if(values.Count==1)candidates.Add(Tuple.Create(code,offset,values.First()));
-                }
+                DecodedCode code;try{code=Decode(f);}catch{continue;}
+                if(ClockCoverage(code,clock,1).Length==0)continue;
+                foreach(var state in CoopStates(code))candidates.Add(Tuple.Create(code,state.Item1,state.Item2));
             }
             if(candidates.Count==1)
             {
                 var match=candidates[0];Functions["Coop"]=match.Item1;Field("coopPhase",match.Item2,"Coop");CoopRunningState=match.Item3;
-                var predicates=new HashSet<int>();foreach(int p in Enumerable.Range(0,run.Instructions.Length).Where(p=>IsCoopDispatch(run,p,match.Item1.Function.Start))){Field("coop",DecodedCode.Disp(run.Instructions[p]),"Run");predicates.Add(run.Instructions[p].Mnemonic==Mnemonic.Cmp&&DecodedCode.Immediate(run.Instructions[p],1,1)?1:-1);}
-                Need(predicates.Count==1,"Co-op dispatch predicates disagree.");CoopValue=predicates.First();
-                foreach(int p in Enumerable.Range(0,match.Item1.Instructions.Length).Where(p=>RunClockStore(match.Item1,p,Known("clock"))))Field("clock",DecodedCode.Disp(match.Item1.Instructions[p]),"Coop");
+                DependOnClocks(match.Item1,match.Item1,clock,1);
+                publish(dispatches.Where(p=>IsCoopDispatch(run,p,match.Item1.Function.Start)).ToArray());
+                foreach(int p in Enumerable.Range(0,match.Item1.Instructions.Length).Where(p=>RunClockStore(match.Item1,p,clock)))Field("clock",DecodedCode.Disp(match.Item1.Instructions[p]),"Coop");
                 return;
             }
+            if(dispatches.Select(p=>DecodedCode.Disp(run.Instructions[p])).Distinct().Count()==1)publish(dispatches);
             Failures["Coop"]="Co-op state and clock could not be tied uniquely to a run call or tail jump.";
+        }
+        readonly Dictionary<int,Tuple<int,int>[]> coopStates=new Dictionary<int,Tuple<int,int>[]>();
+        Tuple<int,int>[] CoopStates(DecodedCode code)
+        {
+            if(code==null)return new Tuple<int,int>[0];Tuple<int,int>[] cached;if(coopStates.TryGetValue(code.Function.Start,out cached))return cached;
+            var ins=code.Instructions;var states=new List<Tuple<int,int>>();
+            for(int at=0;at+1<ins.Length&&ins[at].IP<(ulong)(code.Function.Start+256);at++)
+            {
+                var load=ins[at];if(load.Mnemonic!=Mnemonic.Movzx||load.MemorySize.GetSize()!=1||!code.Flow.Argument(at,load.MemoryBase,0)||!SelfTest(ins[at+1],load.Op0Register))continue;
+                int offset=DecodedCode.Disp(load);if(runPhaseOffsets.Contains(offset))continue;var values=new HashSet<int>();
+                for(int p=0;p+1<ins.Length;p++)
+                    if(ins[p].Mnemonic==Mnemonic.Movzx&&ins[p].MemorySize.GetSize()==1&&code.Flow.Argument(p,ins[p].MemoryBase,0)&&DecodedCode.Disp(ins[p])==offset&&ins[p+1].Mnemonic==Mnemonic.Cmp&&ByteResult(ins[p].Op0Register,ins[p+1].Op0Register)&&ByteImmediate(ins[p+1]))values.Add((int)ins[p+1].GetImmediate(1));
+                if(values.Count==1)states.Add(Tuple.Create(offset,values.First()));
+            }
+            cached=states.Distinct().ToArray();coopStates[code.Function.Start]=cached;return cached;
         }
         void DiscoverChoose()
         {
