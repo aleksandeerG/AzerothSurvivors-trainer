@@ -31,6 +31,8 @@ namespace AzerothTrainer
     {
         internal readonly int Rva,Continuation,Guard;
         internal int TailRegister=-1;
+        // RAX is live at the site, so the RAX-based absolute entry is unsafe.
+        internal bool NearOnly;
         internal readonly byte[] Original;
         internal HookSite(GameImage image,ImageFunction function,int start,int size,int continuation,int guard)
         {

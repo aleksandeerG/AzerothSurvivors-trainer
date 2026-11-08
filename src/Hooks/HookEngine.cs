@@ -21,7 +21,7 @@ namespace AzerothTrainer
             var b=new List<byte>(Hex("48 B8"));b.AddRange(BitConverter.GetBytes(target.ToInt64()));b.AddRange(Hex("FF E0"));
             if(size<12)throw new ArgumentOutOfRangeException("size");while(b.Count<size)b.Add(0x90);return b.ToArray();
         }
-        internal static byte[] EntryJump(IntPtr source,IntPtr target,int size)
+        internal static byte[] EntryJump(IntPtr source,IntPtr target,int size,bool nearOnly=false)
         {
             long delta=target.ToInt64()-source.ToInt64()-6;
             // The ignored CS prefix keeps Windows from mistaking a bare JMP
@@ -29,6 +29,7 @@ namespace AzerothTrainer
             if(size>=6&&delta>=Int32.MinValue&&delta<=Int32.MaxValue&&UnwindSupport.RelativeEntrySafe())
             {var bytes=new List<byte>{0x2e,0xe9};bytes.AddRange(BitConverter.GetBytes((int)delta));while(bytes.Count<size)bytes.Add(0x90);return bytes.ToArray();}
             if(size<12)throw new Exception("Relative entry range or Windows unwind validation requires a 12-byte fallback window.");
+            if(nearOnly)throw new Exception("RAX is live at this site; it requires a relative entry within range and Windows unwind validation.");
             return EntryJump(target,size);
         }
         internal static void Replay(Assembler a,IntPtr cave,IntPtr image,HookSite site)
@@ -180,12 +181,13 @@ namespace AzerothTrainer
         readonly Func<IntPtr,byte[]> builder;
         readonly int sourceRva;
         readonly byte[] sourceFrame;
+        readonly bool nearOnly;
         bool retained,registered;
         internal IntPtr Cave {get;private set;}
         byte[] installed;
         internal bool Enabled {get;private set;}
-        internal MemoryPatch(IntPtr h,int processId,IntPtr site,byte[] original,int guard,Func<IntPtr,byte[]> code,int unwindRva=-1,byte[] frame=null)
-        {handle=h;pid=processId;Site=site;Original=original;guardLength=guard;builder=code;sourceRva=unwindRva;sourceFrame=frame;}
+        internal MemoryPatch(IntPtr h,int processId,IntPtr site,byte[] original,int guard,Func<IntPtr,byte[]> code,int unwindRva=-1,byte[] frame=null,bool near=false)
+        {handle=h;pid=processId;Site=site;Original=original;guardLength=guard;builder=code;sourceRva=unwindRva;sourceFrame=frame;nearOnly=near;}
         internal void Validate()
         {
             if(!Native.Equal(Native.Read(handle,Site,Original.Length),Original))
@@ -198,7 +200,7 @@ namespace AzerothTrainer
             if(builder!=null&&Cave==IntPtr.Zero)
             {
                 Cave=AllocateNear();
-                if(Cave==IntPtr.Zero&&Original.Length>=12)Cave=Native.VirtualAllocEx(handle,IntPtr.Zero,(UIntPtr)8192,0x3000,4);
+                if(Cave==IntPtr.Zero&&Original.Length>=12&&!nearOnly)Cave=Native.VirtualAllocEx(handle,IntPtr.Zero,(UIntPtr)8192,0x3000,4);
                 if(Cave==IntPtr.Zero)throw Native.Error("Cannot allocate trainer memory");
             }
             try
@@ -214,7 +216,7 @@ namespace AzerothTrainer
                     if(initialize!=null)initialize(this);
                     uint old;if(!Native.VirtualProtectEx(handle,Cave,(UIntPtr)4096,0x20,out old))throw Native.Error("Cannot prepare trainer instructions");
                     if(!Native.FlushInstructionCache(handle,Cave,(UIntPtr)4096))throw Native.Error("Cannot refresh trainer instructions");
-                    replacement=RarityCode.EntryJump(Site,Cave,Original.Length);
+                    replacement=RarityCode.EntryJump(Site,Cave,Original.Length,nearOnly);
                 }
                 using(var frozen=new FrozenThreads(pid))
                 {
@@ -397,7 +399,7 @@ namespace AzerothTrainer
             rarity[variant]=patch;all.Add(patch);
         }
         MemoryPatch AddGenerated(IntPtr image,HookSite site,Func<IntPtr,byte[]> code)
-        {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva,layout.Frame(site));all.Add(patch);return patch;}
+        {var patch=new MemoryPatch(handle,Game.Id,Native.Add(image,site.Rva),site.Original,site.Guard,code,site.Rva,layout.Frame(site),site.NearOnly);all.Add(patch);return patch;}
         internal static PatchSession Attach()
         {
             Process selected=GameLocator.FindRunning();
@@ -419,8 +421,9 @@ namespace AzerothTrainer
             {
                 if(options.StatEnabled[0])
                 {
-                    health.Install(null,delegate(MemoryPatch p){p.Data(0,new byte[8]);});
-                    health.Data(0,BitConverter.GetBytes((ulong)RunStat.All[0].Bits(options.StatValues[0])|1UL<<32));
+                    byte[] floor=BitConverter.GetBytes(RunStat.All[0].Bits(options.StatValues[0]));
+                    health.Install(null,delegate(MemoryPatch p){p.Data(0,floor);});
+                    health.Data(0,floor);
                 }
                 else health.Remove();
             }

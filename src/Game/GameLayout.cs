@@ -126,7 +126,7 @@ namespace AzerothTrainer
         }
         void CheckBuild(HookSite site,byte[] bytes)
         {
-            Need(bytes.Length>0&&bytes.Length<3500,"Generated hook exceeds its code allocation.");RarityCode.EntryJump(new IntPtr(0x140000000L+site.Rva),new IntPtr(0x150000000L),site.Original.Length);Need(Frame(site).Length<=96,"Generated unwind frame exceeds its allocation.");
+            Need(bytes.Length>0&&bytes.Length<3500,"Generated hook exceeds its code allocation.");RarityCode.EntryJump(new IntPtr(0x140000000L+site.Rva),new IntPtr(0x150000000L),site.Original.Length,site.NearOnly);Need(Frame(site).Length<=96,"Generated unwind frame exceeds its allocation.");
             var decoder=Decoder.Create(64,new ByteArrayCodeReader(bytes));
             while(decoder.IP<(ulong)bytes.Length){Instruction instruction;decoder.Decode(out instruction);Need(!instruction.IsInvalid&&instruction.NextIP<=(ulong)bytes.Length,"The trial hook contains an invalid instruction.");}
         }

@@ -23,7 +23,7 @@ namespace AzerothTrainer
         readonly Dictionary<string,HashSet<int>> phaseCandidates=new Dictionary<string,HashSet<int>>();
         internal bool PricesComplete;
         internal int HealthRegister=-1,PriceCount,OfferStride,OfferRarity;
-        internal bool ReviewedRelease {get{return Image.Hash=="0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908"||Image.Hash=="6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa";}}
+        internal bool ReviewedRelease {get{return Image.Hash=="0bb6c557c5f6cfeea212761a33554f9a5647ce7cb7e03b8a163b95489496e908"||Image.Hash=="6ca5f4ba4eb6b26716e4b7d9e03cbd25ddafe7582dcd8e55333e070a28058afa"||Image.Hash=="069c800761120073cd0038322e3418f2a97454b510117d509aae07f1028aaf2f";}}
         readonly List<Tuple<DecodedCode,HookSite,RarityRegisters>> rollCandidates=new List<Tuple<DecodedCode,HookSite,RarityRegisters>>();
         readonly Dictionary<int,DecodedCode> cache=new Dictionary<int,DecodedCode>();
         Dictionary<string,List<int>> labelReferences;bool textOwnersValidated;
@@ -573,7 +573,12 @@ namespace AzerothTrainer
             var match=candidates[0];Functions["Health"]=match.Item1;HealthRegister=match.Item4;var storeInstruction=match.Item1.Instructions[match.Item3];
             Field("hp",match.Item5,"Health");Field("maxHp",DecodedCode.Disp(storeInstruction),"Health");
             if(ReviewedRelease)Field("reviewedStatsBase",DecodedCode.Disp(storeInstruction)-0x68,"Health");
-            try{int last=Cover(match.Item1,match.Item2,12);match.Item1.DeadAfter(match.Item2,Register.RAX);Sites["HealthHook"]=Site("HealthHook",match.Item1,match.Item2,last,last);}
+            try
+            {
+                int last=Cover(match.Item1,match.Item2,12);bool raxLive=false;
+                try{match.Item1.DeadAfter(match.Item2,Register.RAX);}catch{raxLive=true;}
+                var site=Site("HealthHook",match.Item1,match.Item2,last,last);site.NearOnly=raxLive;Sites["HealthHook"]=site;
+            }
             catch(Exception ex){Failures["HealthHook"]="Health fields recognized; floor patch refused: "+ex.Message;}
         }
         internal int RunOwnerRegister=1,RunTimeRegister=-1,RunClockDirection=1;
