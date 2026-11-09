@@ -1,5 +1,11 @@
 using System;
 using System.Windows.Forms;
+using System.Reflection;
+[assembly: AssemblyTitle("Azeroth Survivors Trainer Plus")]
+[assembly: AssemblyProduct("Azeroth Survivors Trainer Plus")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyInformationalVersion("1.0.0")]
 namespace AzerothTrainer
 {
     static class Program

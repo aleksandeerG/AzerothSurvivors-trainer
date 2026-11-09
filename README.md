@@ -4,6 +4,8 @@ A portable Windows x64 trainer for Azeroth Survivors by **[aleksanderG](https://
 
 [More projects](https://aleksanderg.com/) · [Support on Ko-fi](https://ko-fi.com/K3P227JS3D)
 
+**[Download the latest release](https://github.com/aleksandeerG/AzerothSurvivors-trainer/releases/latest)** — ready to run; no need to build it yourself.
+
 ![Trainer launcher showing rarity and reroll controls](docs/images/rarity-and-rolls.png)
 
 ## Features
@@ -28,9 +30,19 @@ Click an image to view it at full size.
 | **Auto-pick** | **Run stats** |
 | [![Automatic spell and item selection controls](docs/images/auto-pick.png)](docs/images/auto-pick.png) | [![Selectable character stat minimums](docs/images/run-stats.png)](docs/images/run-stats.png) |
 
-## Build and launch
+## Download and run
 
 Requires **64-bit Windows**, **.NET Framework 4.5 or newer** (4.8 recommended), and a supported desktop build of Azeroth Survivors. Run the trainer and game under the same Windows user with matching administrator privileges.
+
+1. Open the **[latest release](https://github.com/aleksandeerG/AzerothSurvivors-trainer/releases/latest)**.
+2. Under **Assets**, download **`Azeroth-Trainer-Plus.exe`**. The source-code archives are only needed if you want to build it yourself.
+3. Save the executable in a writable folder, such as beside `AzerothSurvivors.exe`, and double-click it.
+
+The trainer is a single portable executable. No installation, compiler, or build tools are needed. Game files are not included.
+
+## Build from source (optional)
+
+If you prefer to build the trainer yourself:
 
 ```powershell
 git clone https://github.com/aleksandeerG/AzerothSurvivors-trainer.git
