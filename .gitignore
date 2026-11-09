@@ -1,4 +1,4 @@
-# Publish only the trainer's production sources and build documentation.
+# Publish the trainer's production sources, artwork and documentation.
 /*
 !/.gitignore
 !/README.md
@@ -6,6 +6,16 @@
 /src/**
 !/src/**/
 !/src/**/*.cs
+!/src/Assets/kofi-support.png
+!/docs/
+/docs/*
+!/docs/images/
+/docs/images/*
+!/docs/images/rarity-and-rolls.png
+!/docs/images/run-and-time.png
+!/docs/images/talents-and-marks.png
+!/docs/images/auto-pick.png
+!/docs/images/run-stats.png
 !/scripts/
 /scripts/*
 !/scripts/build.ps1

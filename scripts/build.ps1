@@ -60,7 +60,7 @@ $sourceFiles = @(
     'src\Diagnostics\TrainerDiagnostics.cs'
 ) | ForEach-Object { Join-Path $trainerRoot $_ }
 
-& $compilerPath /nologo /target:winexe /platform:x64 /optimize+ "/out:$outputPath" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/reference:$decoderLibrary" "/resource:$decoderLibrary,Iced.dll" "/resource:$(Join-Path $packageDirectory 'LICENSE.txt'),Iced.LICENSE.txt" $sourceFiles
+& $compilerPath /nologo /target:winexe /platform:x64 /optimize+ "/out:$outputPath" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/reference:$decoderLibrary" "/resource:$decoderLibrary,Iced.dll" "/resource:$(Join-Path $packageDirectory 'LICENSE.txt'),Iced.LICENSE.txt" "/resource:$(Join-Path $trainerRoot 'src\Assets\kofi-support.png'),AzerothTrainer.KofiSupport.png" $sourceFiles
 if ($LASTEXITCODE -ne 0) { throw 'Trainer compilation failed.' }
 Write-Output "Built $outputPath"
 

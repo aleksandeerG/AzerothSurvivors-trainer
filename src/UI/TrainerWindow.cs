@@ -27,7 +27,7 @@ namespace AzerothTrainer
         bool profileSelected;
         internal TrainerWindow()
         {
-            Text="Azeroth Survivors Trainer Plus";ClientSize=new Size(760,690);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
+            Text="Azeroth Survivors Trainer Plus";ClientSize=new Size(760,710);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(24,27,34);ForeColor=Color.WhiteSmoke;
             Label(Controls,"Azeroth Survivors Trainer",22,17,700,38,new Font("Segoe UI",18,FontStyle.Bold));
             var tabs=new TabControl{Location=new Point(20,70),Size=new Size(720,410)};Controls.Add(tabs);
@@ -77,9 +77,9 @@ namespace AzerothTrainer
             Configure(disable,"Disable",562,497,178);disable.Click+=delegate{try{if(!ConfirmPendingProfile("Disable")||session==null)return;bool pending=talentPending!=0||marksPending!=0;session.Disable();talentPending=marksPending=0;status.ForeColor=Color.WhiteSmoke;UpdateButtons();status.Text=pending?"Disabled. Check the Armory: a pending class edit may have completed before disabling.":"Disabled. Original game code restored.";}catch(Exception ex){ShowError(ex);}};Controls.Add(disable);
             status.SetBounds(23,555,714,74);status.Text="Disabled. Start the game, select options, then enable.";Controls.Add(status);
             compatibility.SetBounds(23,630,714,18);compatibility.Font=new Font("Segoe UI",8.5f);compatibility.ForeColor=Color.FromArgb(255,192,90);compatibility.AutoEllipsis=true;Controls.Add(compatibility);
-            Label(Controls,"Created by aleksanderG",23,649,205,25,new Font("Segoe UI",9));
-            CreditLink("aleksanderg.com","https://aleksanderg.com/",235,649,190);
-            CreditLink("Support on Ko-fi","https://ko-fi.com/K3P227JS3D",451,649,220);
+            Label(Controls,"Created by aleksanderG",23,663,205,25,new Font("Segoe UI",9));
+            CreditLink("aleksanderg.com","https://aleksanderg.com/",235,663,190);
+            KofiButton();
             timer.Interval=700;timer.Tick+=delegate{PollSafely(Poll,delegate(Exception ex){status.Text="Status check: "+ex.Message;});};timer.Start();UpdateButtons();
             FormClosing+=delegate(object sender,FormClosingEventArgs e)
             {
@@ -236,8 +236,22 @@ namespace AzerothTrainer
         void CreditLink(string text,string url,int x,int y,int width)
         {
             var link=new LinkLabel{Text=text,Location=new Point(x,y),Size=new Size(width,25),LinkColor=Color.FromArgb(130,195,255),ActiveLinkColor=Color.White,VisitedLinkColor=Color.FromArgb(130,195,255)};
-            link.LinkClicked+=delegate{try{using(Process p=Process.Start(new ProcessStartInfo(url){UseShellExecute=true})){} }catch(Exception ex){ShowError(ex);}};
+            link.LinkClicked+=delegate{OpenCreditLink(url);};
             Controls.Add(link);
+        }
+        void KofiButton()
+        {
+            var button=new Button{Location=new Point(515,650),Size=new Size(220,45),FlatStyle=FlatStyle.Flat,Cursor=Cursors.Hand,AccessibleName="Support on Ko-fi",AccessibleDescription="Open aleksanderG's Ko-fi support page",BackgroundImageLayout=ImageLayout.Zoom,UseVisualStyleBackColor=false,BackColor=BackColor};
+            button.FlatAppearance.BorderSize=0;
+            using(var stream=typeof(TrainerWindow).Assembly.GetManifestResourceStream("AzerothTrainer.KofiSupport.png"))
+            using(var image=Image.FromStream(stream))button.BackgroundImage=new Bitmap(image);
+            button.Click+=delegate{OpenCreditLink("https://ko-fi.com/K3P227JS3D");};
+            button.Disposed+=delegate{button.BackgroundImage.Dispose();};
+            Controls.Add(button);
+        }
+        void OpenCreditLink(string url)
+        {
+            try{using(Process p=Process.Start(new ProcessStartInfo(url){UseShellExecute=true})){} }catch(Exception ex){ShowError(ex);}
         }
         void Number(Control.ControlCollection c,NumericUpDown n,int x,int y,int width,decimal min,decimal max,decimal value,int decimals,decimal step){n.SetBounds(x,y,width,30);n.Minimum=min;n.Maximum=max;n.DecimalPlaces=decimals;n.Increment=step;n.Value=value;c.Add(n);}
         void Check(Control.ControlCollection c,CheckBox b,string text,int x,int y,int width,bool value){b.Text=text;b.SetBounds(x,y,width,29);b.Checked=value;c.Add(b);}
